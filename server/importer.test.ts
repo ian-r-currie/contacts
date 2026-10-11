@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { parseCsv } from "./csv.ts";
 import { openDb } from "./db.ts";
@@ -33,10 +37,11 @@ test("normalizeDate and splitNames", () => {
 
 test("import builds relationships, merges duplicates and matches nameless rows by website", () => {
   const db = openDb(":memory:");
-  const first = importCsv(db, PEOPLE, { category: "Contact" });
+  const first = importCsv(db, PEOPLE, {});
   assert.equal(first.created, 2);
   assert.equal(first.stubs, 2); // Charles Babbage, Mary
   assert.equal(first.relations, 3);
+  assert.equal(db.findByName("charles babbage")!.in_network, false);
 
   const ada = db.listContacts().find((c) => c.name === "Ada Lovelace")!;
   assert.equal(ada.follow_up_date, "2026-10-17");
@@ -45,26 +50,28 @@ test("import builds relationships, merges duplicates and matches nameless rows b
   assert.equal(ada.updated_at.slice(0, 10), "2026-10-07");
   assert.deepEqual(ada.related.map((r) => r.name).sort(), ["Charles Babbage", "Grace Hopper", "Mary"]);
 
-  const second = importCsv(db, PROFS, { category: "Professor" });
+  const second = importCsv(db, PROFS, { role: "Professor" });
   assert.equal(second.merged, 2); // Babbage by name, Mary by website domain
   assert.equal(second.created, 0);
   assert.equal(second.skipped, 1);
 
   const babbage = db.listContacts().find((c) => c.name === "Charles Babbage")!;
-  assert.equal(babbage.category, "Professor");
+  assert.equal(babbage.role, "Professor");
+  assert.equal(babbage.in_network, true); // was only a connection until the profs import
   assert.equal(babbage.research, "Engines");
   assert.equal(babbage.email, "cb@example.com");
+  assert.equal(db.listContacts().find((c) => c.name === "Grace Hopper")!.in_network, true);
   const mary = db.listContacts().find((c) => c.name === "Mary")!;
   assert.equal(mary.website, "https://www.marysomerville.example.org");
 
   // Re-importing doesn't duplicate anything.
-  importCsv(db, PEOPLE, { category: "Contact" });
+  importCsv(db, PEOPLE, {});
   assert.equal(db.listContacts().length, 4);
 });
 
 test("a nameless row imported first is renamed when someone references it later", () => {
   const db = openDb(":memory:");
-  importCsv(db, PROFS, { category: "Professor" });
+  importCsv(db, PROFS, { role: "Professor" });
   assert.ok(db.listContacts().some((c) => c.name === "Unknown (marysomerville.example.org)"));
   importCsv(db, "Name,Related to\nAda Lovelace,Mary Somerville\n");
   const names = db.listContacts().map((c) => c.name);
@@ -77,8 +84,8 @@ test("relationships are undirected and removed with the contact", () => {
   const a = db.createContact({ name: "A" });
   const b = db.createContact({ name: "B" });
   db.relate(b, a, "colleagues");
-  assert.deepEqual(db.getContact(a)!.related, [{ id: b, name: "B", note: "colleagues" }]);
-  assert.deepEqual(db.getContact(b)!.related, [{ id: a, name: "A", note: "colleagues" }]);
+  assert.deepEqual(db.getContact(a)!.related, [{ id: b, name: "B", note: "colleagues", in_network: true }]);
+  assert.deepEqual(db.getContact(b)!.related, [{ id: a, name: "A", note: "colleagues", in_network: true }]);
   db.deleteContact(b);
   assert.deepEqual(db.getContact(a)!.related, []);
 });
@@ -91,4 +98,35 @@ test("follow-up notifications re-arm when the date changes", () => {
   assert.equal(db.dueFollowUps("2026-10-11", true).length, 0);
   db.updateContact(id, { follow_up_date: "2026-10-11" });
   assert.equal(db.dueFollowUps("2026-10-11", true).length, 1);
+});
+
+test("editing schools drops a current school that is no longer listed", () => {
+  const db = openDb(":memory:");
+  const id = db.createContact({ name: "A", schools: "UBC, McGill", current_school: "McGill" });
+  db.updateContact(id, { schools: "UBC, McGill, Queens" });
+  assert.equal(db.getContact(id)!.current_school, "McGill");
+  db.updateContact(id, { schools: "UBC" });
+  assert.equal(db.getContact(id)!.current_school, "");
+});
+
+test("databases from the first version are migrated", () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "contacts-")), "old.db");
+  const old = new DatabaseSync(file);
+  old.exec(`
+    CREATE TABLE contacts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '',
+      department TEXT NOT NULL DEFAULT '', schools TEXT NOT NULL DEFAULT '', research TEXT NOT NULL DEFAULT '', website TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '', last_contacted TEXT NOT NULL DEFAULT '', follow_up_date TEXT NOT NULL DEFAULT '',
+      follow_up_notified TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');
+    CREATE TABLE relationships (a_id INTEGER NOT NULL, b_id INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (a_id, b_id));
+    INSERT INTO contacts (id, name, category, role) VALUES (1, 'Prof', 'Professor', ''), (2, 'Student', 'Contact', 'PhD'), (3, 'Friend', '', ''), (4, 'Loner', '', '');
+    INSERT INTO relationships (a_id, b_id) VALUES (2, 3);
+  `);
+  old.close();
+  const db = openDb(file);
+  const byName = Object.fromEntries(db.listContacts().map((c) => [c.name, c]));
+  assert.equal(byName.Prof.role, "Professor");
+  assert.equal(byName.Student.role, "PhD");
+  assert.equal(byName.Friend.in_network, false);
+  assert.equal(byName.Loner.in_network, true);
+  assert.ok(!("category" in byName.Prof));
 });

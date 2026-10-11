@@ -37,9 +37,9 @@ export function RelatedEditor({ contact, contacts, onOpen, onChanged, notify }: 
 
   const choose = async (item: (typeof items)[number]) => {
     try {
-      const otherId = item.kind === "link" ? item.c.id : (await api.create({ name: item.name })).id;
+      const otherId = item.kind === "link" ? item.c.id : (await api.create({ name: item.name, in_network: false })).id;
       await api.relate(contact.id, otherId);
-      if (item.kind === "create") notify(`Created ${item.name} and linked them`);
+      if (item.kind === "create") notify(`Linked ${item.name} (outside your network; open them to add as a contact)`);
       setQuery("");
       setActive(0);
       onChanged();
@@ -59,7 +59,7 @@ export function RelatedEditor({ contact, contacts, onOpen, onChanged, notify }: 
       <ul className="related-list">
         {contact.related.map((r) => (
           <li key={r.id}>
-            <button className="tag person" onClick={() => onOpen(r.id)}>
+            <button className={`tag person ${r.in_network ? "" : "outside"}`} title={r.in_network ? undefined : "Outside your network"} onClick={() => onOpen(r.id)}>
               {r.name}
             </button>
             {editingNote === r.id ? (

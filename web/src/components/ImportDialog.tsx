@@ -10,7 +10,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
   const [fileName, setFileName] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [mapping, setMapping] = useState<Record<string, ImportTarget>>({});
-  const [category, setCategory] = useState("");
+  const [role, setRole] = useState("");
   const [summary, setSummary] = useState<ImportSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -27,7 +27,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
       const p = await api.importPreview(text);
       setPreview(p);
       setMapping(p.mapping);
-      setCategory(p.suggestedCategory);
+      setRole(p.suggestedRole);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -36,7 +36,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
   const run = async () => {
     setBusy(true);
     try {
-      const s = await api.importCsv(csv, category, mapping);
+      const s = await api.importCsv(csv, role, mapping);
       setSummary(s);
       onImported(`Imported ${fileName}: ${s.created} new, ${s.merged} merged`);
     } catch (err) {
@@ -93,10 +93,10 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
               ))}
             </tbody>
           </table>
-          {!Object.values(mapping).includes("category") && (
+          {(
             <label className="inline-field">
-              Category for these rows
-              <input value={category} onChange={(e) => setCategory(e.target.value)} list="category-options" />
+              Role for rows that don't have one (optional, e.g. Professor)
+              <input value={role} onChange={(e) => setRole(e.target.value)} list="role-options" />
             </label>
           )}
           <div className="dialog-actions">
@@ -112,8 +112,8 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
       {summary && (
         <div className="import-summary">
           <p>
-            <strong>{summary.created}</strong> created · <strong>{summary.merged}</strong> merged · <strong>{summary.stubs}</strong> placeholders
-            from “Related to” · <strong>{summary.relations}</strong> relationships · {summary.skipped} skipped
+            <strong>{summary.created}</strong> created · <strong>{summary.merged}</strong> merged · <strong>{summary.stubs}</strong> people outside
+            your network from “Related to” · <strong>{summary.relations}</strong> relationships · {summary.skipped} skipped
           </p>
           {summary.notes.length > 0 && (
             <ul className="small">

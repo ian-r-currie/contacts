@@ -11,7 +11,7 @@ export const config = {
   dataDir: path.resolve(process.env.DATA_DIR ?? "data"),
   /** Optional. When set, every API call requires logging in with this password. Set it before exposing the app beyond localhost. */
   appPassword: process.env.APP_PASSWORD ?? "",
-  anthropicModel: process.env.RESEARCH_MODEL ?? "claude-opus-5-5",
+  anthropicModel: process.env.RESEARCH_MODEL ?? "claude-sonnet-5-5",
   /** Hour of the day (local server time, 0-23) from which follow-up notifications are sent. */
   notifyHour: Number(process.env.NOTIFY_HOUR ?? 8),
   /** Contact address embedded in Web Push VAPID details (required by the spec; any mailto: or https: URL). */

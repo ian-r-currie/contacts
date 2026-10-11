@@ -1,6 +1,6 @@
 import { useEffect } from "react";
-import { addDays, api, dueState, formatDate, LABELS, localToday, type Contact, type Field } from "../api";
-import { Chips, DueBadge, websiteLabel } from "./ContactTable";
+import { addDays, api, currentSchool, dueState, formatDate, LABELS, localToday, type Contact, type ContactInput, type Field } from "../api";
+import { DueBadge, SchoolChips, websiteLabel } from "./ContactTable";
 import { EditableCell } from "./EditableCell";
 import { RelatedEditor } from "./RelatedEditor";
 import { ResearchPanel } from "./ResearchPanel";
@@ -10,12 +10,11 @@ export type PanelTab = "details" | "research";
 type Props = {
   contact: Contact;
   contacts: Contact[];
-  categories: string[];
   tab: PanelTab;
   onTab: (tab: PanelTab) => void;
   onClose: () => void;
   onOpen: (id: number) => void;
-  onUpdate: (id: number, fields: Partial<Record<Field, string>>) => Promise<void>;
+  onUpdate: (id: number, fields: ContactInput) => Promise<void>;
   onChanged: () => void;
   notify: (msg: string) => void;
   researchEnabled: boolean;
@@ -54,7 +53,10 @@ export function DetailPanel({ contact: c, contacts, tab, onTab, onClose, onOpen,
       <div className="panel-head">
         <div className="panel-title">
           <EditableCell value={c.name} onSave={save("name")} className="title-cell" />
-          <div className="muted small">{[c.role, c.department].filter(Boolean).join(" · ")}</div>
+          <div className="muted small">
+            {[c.role, c.department, currentSchool(c)].filter(Boolean).join(" · ")}
+            {!c.in_network && <span className="outside-badge">outside network</span>}
+          </div>
         </div>
         <button className="icon-btn" onClick={onClose} aria-label="Close" title="Close (Esc)">
           ✕
@@ -88,10 +90,24 @@ export function DetailPanel({ contact: c, contacts, tab, onTab, onClose, onOpen,
               ))}
             </section>
 
-            {field("category", { list: "category-options" })}
-            {field("role")}
+            {!c.in_network && (
+              <div className="callout outside">
+                <p>
+                  Outside your network: here because they're connected to {c.related.map((r) => r.name).join(", ") || "someone you know"}.
+                  They show in the network web but not in your contacts list.
+                </p>
+                <button onClick={() => onUpdate(c.id, { in_network: true }).then(() => notify(`${c.name} added to your contacts`))}>
+                  Add to my contacts
+                </button>
+              </div>
+            )}
+
+            {field("role", { list: "role-options" })}
             {field("department")}
-            {field("schools", { display: <Chips value={c.schools} /> })}
+            {field("schools", {
+              display: <SchoolChips contact={c} onSetCurrent={(school) => onUpdate(c.id, { current_school: school })} />,
+              placeholder: "Add… (comma-separated)",
+            })}
             {field("research", { type: "textarea" })}
             {field("website", {
               display: (
@@ -129,6 +145,18 @@ export function DetailPanel({ contact: c, contacts, tab, onTab, onClose, onOpen,
             <footer className="panel-foot">
               <span className="muted small">
                 Added {formatDate(c.created_at)} · Updated {formatDate(c.updated_at)}
+                {c.in_network && c.related.length > 0 && (
+                  <>
+                    {" · "}
+                    <button
+                      className="link small"
+                      title="Keep them in the network web as a connection, but hide them from your contacts list"
+                      onClick={() => onUpdate(c.id, { in_network: false }).then(() => notify(`${c.name} moved outside your network`))}
+                    >
+                      move outside network
+                    </button>
+                  </>
+                )}
               </span>
               <button
                 className="danger"

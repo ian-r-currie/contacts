@@ -2,9 +2,12 @@
 
 A personal contact tracker for keeping up with people you meet: students, professors and anyone else. It replaces the "Contacts" and "Profs" spreadsheet tabs with:
 
-- **A spreadsheet-like table.** Click any cell to edit it. Sort by any column, search everything, and filter by category.
+- **A spreadsheet-like table.** Click any cell to edit it. Sort by any column and search everything.
 - **Quick add.** Type just a name and press Enter. Fill in the rest later yourself, or let the research agent do it.
 - **Real many-to-many relationships.** "Related to" links point at actual contacts. They work in both directions, can carry a note ("met at the HCI social"), and you can create a new person straight from the link box.
+- **Network web.** Switch to **Network** to see everyone and their connections. Click a person to highlight who they're connected to, drag nodes around, and scroll or pinch to zoom.
+- **People outside your network.** Someone who is only listed as a connection (e.g. a friend of a friend) appears in the web as a hollow dashed node but stays out of your contacts list. Open them and click **Add to my contacts** to bring them in. Adding someone by a name that already exists as a connection does the same.
+- **Current school.** With several schools listed, click one to highlight it as their current school. With a single school, that one is current.
 - **Last contacted.** A **✓ Contacted today** button also clears a follow-up that has come due.
 - **Follow-up reminders.** Due and overdue follow-ups are highlighted, have their own filter, and send a push notification to your browser or phone.
 - **Research agent (✦).** Open a contact's side panel and press **Research**. A Claude agent searches the web, fills in empty fields automatically, and lists anything that differs from what you have so you can accept or dismiss it. It also cites its sources. Research keeps running if you close the panel.
@@ -35,13 +38,13 @@ In Google Sheets, open each tab and choose **File → Download → Comma-separat
 
   ```bash
   npm run import -- ~/Downloads/Planning\ -\ Contacts.csv
-  npm run import -- --category Professor ~/Downloads/Planning\ -\ Profs.csv
+  npm run import -- --role Professor ~/Downloads/Planning\ -\ Profs.csv
   ```
 
 What the importer does:
 
-- **Columns.** Name/Professor → Name, School/Schools → Schools, and Updated → the updated date. "Interest" and "Emailed On" are ignored.
-- **Related to.** Each name is linked to the matching contact. A first name alone ("Sam") links to the only person with that first name. Unknown names become placeholder contacts you can fill in later.
+- **Columns.** Name/Professor → Name (a file with a "Professor" column gets role Professor by default), School/Schools → Schools, and Updated → the updated date. "Interest" and "Emailed On" are ignored.
+- **Related to.** Each name is linked to the matching contact. A first name alone ("Sam") links to the only person with that first name. Names that match no one are added as people outside your network.
 - **Rows without a name but with a website** (like `janedoe.ca`) are matched to the person whose name appears in the domain. Otherwise they are saved as `Unknown (domain)`, and research can find the real name.
 - **Merging.** Re-importing, or importing a person who already exists, only fills fields that are empty.
 
@@ -49,7 +52,7 @@ You can delete the CSV files afterwards. The database is the source of truth.
 
 ## Research agent
 
-Set `ANTHROPIC_API_KEY` in `.env` and restart the server. The agent uses Claude (`claude-opus-5-5` by default; override it with `RESEARCH_MODEL`) with web search and web fetch. It can fill in name, role, department, schools, research, website and email:
+Set `ANTHROPIC_API_KEY` in `.env` and restart the server. The agent uses Claude (`claude-sonnet-5-5`, the latest Sonnet, by default; override it with `RESEARCH_MODEL`) with web search and web fetch. It can fill in name, role, department, schools, research, website and email:
 
 - **Empty fields** are filled automatically.
 - **Fields you already have** become suggestions, never silent overwrites.
@@ -91,7 +94,7 @@ server/            Node + Hono API (TypeScript, run with tsx)
   notify.ts        Web Push + follow-up scheduler
   auth.ts          Optional password login
 web/               React + Vite frontend
-  src/components/  Table, side panel, research panel, import dialog
+  src/components/  Table, network web, side panel, research panel, import dialog
   public/sw.js     Service worker for push notifications
 ```
 

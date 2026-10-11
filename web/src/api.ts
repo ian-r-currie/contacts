@@ -1,9 +1,9 @@
 export const FIELDS = [
   "name",
-  "category",
   "role",
   "department",
   "schools",
+  "current_school",
   "research",
   "website",
   "email",
@@ -16,10 +16,10 @@ export type ResearchableField = "name" | "role" | "department" | "schools" | "re
 
 export const LABELS: Record<Field | "related" | "updated_at", string> = {
   name: "Name",
-  category: "Category",
   role: "Role",
   department: "Department",
   schools: "Schools",
+  current_school: "Current school",
   research: "Research",
   website: "Website",
   email: "Email",
@@ -30,8 +30,10 @@ export const LABELS: Record<Field | "related" | "updated_at", string> = {
   updated_at: "Updated",
 };
 
-export type Relation = { id: number; name: string; note: string };
-export type Contact = { id: number; created_at: string; updated_at: string; related: Relation[] } & Record<Field, string>;
+export type Relation = { id: number; name: string; note: string; in_network: boolean };
+/** in_network is false for people who are only someone's connection, not tracked as contacts themselves. */
+export type Contact = { id: number; in_network: boolean; created_at: string; updated_at: string; related: Relation[] } & Record<Field, string>;
+export type ContactInput = Partial<Record<Field, string>> & { in_network?: boolean };
 
 export type ResearchRun = {
   id: number;
@@ -61,7 +63,7 @@ export type ImportPreview = {
   mapping: Record<string, ImportTarget>;
   rowCount: number;
   sample: string[][];
-  suggestedCategory: string;
+  suggestedRole: string;
 };
 export type ImportSummary = { created: number; merged: number; stubs: number; relations: number; skipped: number; notes: string[] };
 
@@ -92,15 +94,15 @@ export const api = {
   config: () => request<AppConfig>("GET", "/api/config"),
 
   contacts: () => request<Contact[]>("GET", "/api/contacts"),
-  create: (fields: Partial<Record<Field, string>> & { name: string }) => request<Contact>("POST", "/api/contacts", fields),
-  update: (id: number, fields: Partial<Record<Field, string>>) => request<Contact>("PATCH", `/api/contacts/${id}`, fields),
+  create: (fields: ContactInput & { name: string }) => request<Contact>("POST", "/api/contacts", fields),
+  update: (id: number, fields: ContactInput) => request<Contact>("PATCH", `/api/contacts/${id}`, fields),
   remove: (id: number) => request("DELETE", `/api/contacts/${id}`),
   relate: (id: number, otherId: number, note?: string) => request<Contact>("PUT", `/api/contacts/${id}/related/${otherId}`, { note }),
   unrelate: (id: number, otherId: number) => request<Contact>("DELETE", `/api/contacts/${id}/related/${otherId}`),
 
   importPreview: (csv: string) => request<ImportPreview>("POST", "/api/import/preview", { csv }),
-  importCsv: (csv: string, category: string, mapping: Record<string, ImportTarget>) =>
-    request<ImportSummary>("POST", "/api/import", { csv, category, mapping }),
+  importCsv: (csv: string, role: string, mapping: Record<string, ImportTarget>) =>
+    request<ImportSummary>("POST", "/api/import", { csv, role, mapping }),
 
   researchRuns: (id: number) => request<{ runs: ResearchRun[]; running: number | null }>("GET", `/api/contacts/${id}/research`),
   startResearch: (id: number, instructions: string) => request<{ runId: number }>("POST", `/api/contacts/${id}/research`, { instructions }),
@@ -136,4 +138,18 @@ export function dueState(date: string, today = localToday()): DueState {
   if (date === today) return "today";
   if (date <= addDays(today, 7)) return "soon";
   return "later";
+}
+
+export function splitSchools(schools: string): string[] {
+  return schools
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** The highlighted school: the one marked current, or the only one listed. */
+export function currentSchool(c: Pick<Contact, "schools" | "current_school">): string {
+  const list = splitSchools(c.schools);
+  const marked = list.find((s) => s.toLowerCase() === c.current_school.trim().toLowerCase());
+  return marked ?? (list.length === 1 ? list[0] : "");
 }

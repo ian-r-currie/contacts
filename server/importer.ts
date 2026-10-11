@@ -4,8 +4,8 @@ import { CONTACT_FIELDS, type ContactField, type DB } from "./db.ts";
 export type ImportTarget = ContactField | "related" | "updated" | "ignore";
 
 export type ImportOptions = {
-  /** Category for new contacts when the file has no category column (e.g. "Professor"). */
-  category?: string;
+  /** Role for rows that don't have one (e.g. "Professor" for a list of profs). */
+  role?: string;
   /** Header → target overrides. Headers not listed fall back to the automatic guess. */
   mapping?: Record<string, ImportTarget>;
 };
@@ -26,10 +26,6 @@ const SYNONYMS: Record<string, ImportTarget> = {
   prof: "name",
   contact: "name",
   person: "name",
-  category: "category",
-  type: "category",
-  kind: "category",
-  group: "category",
   role: "role",
   title: "role",
   position: "role",
@@ -77,7 +73,7 @@ export function previewCsv(text: string) {
     mapping: guessMapping(headers),
     rowCount: Math.max(rows.length - 1, 0),
     sample: rows.slice(1, 4),
-    suggestedCategory: headers.some((h) => normHeader(h).startsWith("prof")) ? "Professor" : "Contact",
+    suggestedRole: headers.some((h) => normHeader(h).startsWith("prof")) ? "Professor" : "",
   };
 }
 
@@ -134,7 +130,7 @@ export function importCsv(db: DB, text: string, opts: ImportOptions = {}): Impor
 
   const headers = rows[0];
   const mapping = { ...guessMapping(headers), ...opts.mapping };
-  const category = opts.category?.trim() ?? "";
+  const defaultRole = opts.role?.trim() ?? "";
 
   return db.transaction(() => {
     // Live index of everyone in the database, updated as we go.
@@ -167,7 +163,7 @@ export function importCsv(db: DB, text: string, opts: ImportOptions = {}): Impor
         } else if (target === "notes" && fields.notes) fields.notes = `${value}\n${fields.notes}`;
         else fields[target] = fields[target] ? `${fields[target]}, ${value}` : value;
       });
-      if (!fields.category && category) fields.category = category;
+      if (!fields.role && defaultRole) fields.role = defaultRole;
 
       let name = fields.name ?? "";
       let existing = name ? byName.get(name.toLowerCase()) : undefined;
@@ -201,7 +197,8 @@ export function importCsv(db: DB, text: string, opts: ImportOptions = {}): Impor
           if (!current[f]) patch[f] = fields[f];
           else if (f === "notes" && !current.notes.includes(fields.notes!)) patch.notes = `${current.notes}\n${fields.notes}`;
         }
-        db.updateContact(existing.id, patch);
+        // Someone who was only a connection is now a contact in their own right.
+        db.updateContact(existing.id, { ...patch, in_network: true });
         if (patch.website) existing.website = patch.website;
         id = existing.id;
         summary.merged++;
@@ -240,7 +237,7 @@ export function importCsv(db: DB, text: string, opts: ImportOptions = {}): Impor
         return p.id;
       }
 
-      const id = db.createContact({ name: ref });
+      const id = db.createContact({ name: ref, in_network: false });
       add({ id, name: ref, website: "" });
       summary.stubs++;
       return id;

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, dueState, localToday, type AppConfig, type Contact, type Field } from "./api";
+import { api, ApiError, dueState, localToday, type AppConfig, type Contact, type ContactInput } from "./api";
 import { ContactTable, type Column, type SortKey, ALL_COLUMNS, DEFAULT_COLUMNS } from "./components/ContactTable";
 import { DetailPanel, type PanelTab } from "./components/DetailPanel";
 import { ImportDialog } from "./components/ImportDialog";
 import { Menu } from "./components/Menu";
+import { NetworkView } from "./components/NetworkView";
 import { disablePush, enablePush, pushState, registerServiceWorker, type PushState } from "./push";
 
 const load = <T,>(key: string, fallback: T): T => {
@@ -64,7 +65,8 @@ function Main({ authRequired }: { authRequired: boolean }) {
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [query, setQuery] = useState("");
-  const [category, setCategory] = useState<string>(() => load("category", ""));
+  const [view, setView] = useState<"table" | "network">(() => load("view", "table"));
+  const [showOutside, setShowOutside] = useState(false);
   const [dueOnly, setDueOnly] = useState(false);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>(() => load("sort", { key: "name" as SortKey, dir: 1 as const }));
   const [columns, setColumns] = useState<Column[]>(() => load("columns", DEFAULT_COLUMNS).filter((c) => ALL_COLUMNS.includes(c)));
@@ -103,7 +105,7 @@ function Main({ authRequired }: { authRequired: boolean }) {
     return () => document.removeEventListener("visibilitychange", onFocus);
   }, [refresh]);
 
-  useEffect(() => save("category", category), [category]);
+  useEffect(() => save("view", view), [view]);
   useEffect(() => save("sort", sort), [sort]);
   useEffect(() => save("columns", columns), [columns]);
 
@@ -115,7 +117,9 @@ function Main({ authRequired }: { authRequired: boolean }) {
     history.replaceState(null, "", url);
   }, [selected]);
 
-  const categories = useMemo(() => [...new Set((contacts ?? []).map((c) => c.category).filter(Boolean))].sort(), [contacts]);
+  const roles = useMemo(() => [...new Set((contacts ?? []).map((c) => c.role).filter(Boolean))].sort(), [contacts]);
+  const outsideCount = useMemo(() => (contacts ?? []).filter((c) => !c.in_network).length, [contacts]);
+  const networkCount = (contacts?.length ?? 0) - outsideCount;
   const today = localToday();
   const due = useMemo(() => (contacts ?? []).filter((c) => ["overdue", "today"].includes(dueState(c.follow_up_date, today))), [contacts, today]);
 
@@ -123,10 +127,11 @@ function Main({ authRequired }: { authRequired: boolean }) {
     if (!contacts) return [];
     const q = query.trim().toLowerCase();
     const list = contacts.filter((c) => {
-      if (category && c.category !== category) return false;
+      // People who are only someone's connection live in the network web, not the contacts list.
+      if (!c.in_network && !showOutside) return false;
       if (dueOnly && !due.includes(c)) return false;
       if (!q) return true;
-      const hay = [c.name, c.category, c.role, c.department, c.schools, c.research, c.email, c.notes, ...c.related.map((r) => r.name)];
+      const hay = [c.name, c.role, c.department, c.schools, c.research, c.email, c.notes, ...c.related.map((r) => r.name)];
       return hay.some((v) => v.toLowerCase().includes(q));
     });
     const value = (c: Contact) => (sort.key === "related" ? String(c.related.length).padStart(4, "0") : c[sort.key]);
@@ -137,10 +142,10 @@ function Main({ authRequired }: { authRequired: boolean }) {
       if (!va !== !vb) return va ? -1 : 1;
       return va.localeCompare(vb, undefined, { sensitivity: "base", numeric: true }) * sort.dir;
     });
-  }, [contacts, query, category, dueOnly, due, sort]);
+  }, [contacts, query, showOutside, dueOnly, due, sort]);
 
   const update = useCallback(
-    async (id: number, fields: Partial<Record<Field, string>>) => {
+    async (id: number, fields: ContactInput) => {
       setContacts((list) => list?.map((c) => (c.id === id ? { ...c, ...fields } : c)) ?? null);
       try {
         await api.update(id, fields);
@@ -157,7 +162,7 @@ function Main({ authRequired }: { authRequired: boolean }) {
     const name = newName.trim();
     if (!name) return;
     try {
-      const created = await api.create({ name, category });
+      const created = await api.create({ name });
       setNewName("");
       await refresh();
       notify(`Added ${created.name}`);
@@ -221,17 +226,30 @@ function Main({ authRequired }: { authRequired: boolean }) {
       </header>
 
       <div className="filters">
-        <button className={`chip ${!category ? "active" : ""}`} onClick={() => setCategory("")}>
-          All <span className="count">{contacts?.length ?? 0}</span>
-        </button>
-        {categories.map((cat) => (
-          <button key={cat} className={`chip ${category === cat ? "active" : ""}`} onClick={() => setCategory(category === cat ? "" : cat)}>
-            {cat} <span className="count">{contacts?.filter((c) => c.category === cat).length}</span>
+        <div className="segmented" role="tablist" aria-label="View">
+          <button role="tab" aria-selected={view === "table"} className={view === "table" ? "active" : ""} onClick={() => setView("table")}>
+            Table <span className="count">{networkCount}</span>
           </button>
-        ))}
-        <button className={`chip due ${dueOnly ? "active" : ""}`} onClick={() => setDueOnly(!dueOnly)} disabled={!due.length && !dueOnly}>
-          Follow-ups due <span className="count">{due.length}</span>
-        </button>
+          <button role="tab" aria-selected={view === "network"} className={view === "network" ? "active" : ""} onClick={() => setView("network")}>
+            Network
+          </button>
+        </div>
+        {view === "table" && (
+          <>
+            <button className={`chip due ${dueOnly ? "active" : ""}`} onClick={() => setDueOnly(!dueOnly)} disabled={!due.length && !dueOnly}>
+              Follow-ups due <span className="count">{due.length}</span>
+            </button>
+            {outsideCount > 0 && (
+              <button
+                className={`chip ${showOutside ? "active" : ""}`}
+                title="People who are only listed as someone's connection"
+                onClick={() => setShowOutside(!showOutside)}
+              >
+                Outside network <span className="count">{outsideCount}</span>
+              </button>
+            )}
+          </>
+        )}
       </div>
 
       <form className="quick-add" onSubmit={addContact}>
@@ -243,6 +261,12 @@ function Main({ authRequired }: { authRequired: boolean }) {
 
       {error && <p className="error banner">{error}</p>}
 
+      <datalist id="role-options">
+        {[...new Set(["Professor", ...roles])].map((r) => (
+          <option key={r} value={r} />
+        ))}
+      </datalist>
+
       <main className="content">
         {contacts === null ? (
           <p className="empty">Loading…</p>
@@ -253,13 +277,14 @@ function Main({ authRequired }: { authRequired: boolean }) {
               Add someone above, or <button className="link" onClick={() => setImporting(true)}>import your spreadsheet as CSV</button>.
             </p>
           </div>
+        ) : view === "network" ? (
+          <NetworkView contacts={contacts} query={query} focusId={selected?.id} onOpen={(id) => setSelected({ id, tab: "details" })} />
         ) : (
           <ContactTable
             contacts={visible}
             columns={columns}
             sort={sort}
             onSort={(key) => setSort((s) => ({ key, dir: s.key === key ? ((-s.dir) as 1 | -1) : 1 }))}
-            categories={categories}
             selectedId={selected?.id}
             onOpen={(id, tab = "details") => setSelected({ id, tab })}
             onUpdate={update}
@@ -273,7 +298,6 @@ function Main({ authRequired }: { authRequired: boolean }) {
           key={selectedContact.id}
           contact={selectedContact}
           contacts={contacts ?? []}
-          categories={categories}
           tab={selected!.tab}
           onTab={(tab) => setSelected({ id: selectedContact.id, tab })}
           onClose={() => setSelected(null)}
@@ -302,7 +326,6 @@ function Main({ authRequired }: { authRequired: boolean }) {
 
 const LABEL_FOR: Record<Column, string> = {
   name: "Name",
-  category: "Category",
   role: "Role",
   department: "Department",
   schools: "Schools",

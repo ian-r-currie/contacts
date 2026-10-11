@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { config, hasAnthropicCredentials } from "./config.ts";
-import { RESEARCHABLE_FIELDS, type ContactWithRelations, type DB, type ResearchableField, type ResearchRun } from "./db.ts";
+import { RESEARCHABLE_FIELDS, splitSchools, type ContactWithRelations, type DB, type ResearchableField, type ResearchRun } from "./db.ts";
 
 export type ResearchEvent =
   | { type: "status"; text: string }
@@ -69,7 +69,7 @@ type Findings = z.infer<typeof FindingsSchema>;
 
 const FIELD_GUIDE: Record<ResearchableField, string> = {
   name: "Full name as the person writes it professionally.",
-  role: 'Current position, e.g. "Associate Professor", "3rd year PhD Candidate", "Masters Student".',
+  role: 'Current position, e.g. "Professor", "Associate Professor", "3rd year PhD Candidate", "Masters Student".',
   department: 'Department or program, e.g. "Computer Science".',
   schools: "Institutions they are or were affiliated with (current first), comma-separated, short common names (e.g. \"U of T, UBC\").",
   research: "Short comma-separated list of research areas or interests (under ~20 words).",
@@ -117,8 +117,8 @@ When finished, call save_findings exactly once. Set a field to null when you cou
 
 function describeContact(c: ContactWithRelations): string {
   const lines = [`Name: ${c.name}`];
-  for (const f of ["category", "role", "department", "schools", "research", "website", "email", "notes"] as const) {
-    if (c[f]) lines.push(`${f[0].toUpperCase()}${f.slice(1)}: ${c[f]}`);
+  for (const f of ["role", "department", "schools", "current_school", "research", "website", "email", "notes"] as const) {
+    if (c[f]) lines.push(`${f[0].toUpperCase()}${f.slice(1).replace("_", " ")}: ${c[f]}`);
   }
   if (c.related.length) lines.push(`Related to: ${c.related.map((r) => r.name + (r.note ? ` (${r.note})` : "")).join(", ")}`);
   return lines.join("\n");
@@ -217,7 +217,9 @@ function applyFindings(db: DB, runId: number, contactId: number, findings: Findi
     if (!current || placeholder) applied[f] = found;
     else if (current.toLowerCase() !== found.toLowerCase()) suggestions[f] = found;
   }
-  db.updateContact(contactId, applied);
+  // The agent lists schools current-first, so a freshly filled list also gets its current school.
+  const schools = applied.schools ? splitSchools(applied.schools) : [];
+  db.updateContact(contactId, schools.length > 1 && !contact.current_school ? { ...applied, current_school: schools[0] } : applied);
   db.finishRun(runId, { summary: findings.summary.trim(), sources: findings.sources, applied, suggestions });
   return db.getRun(runId)!;
 }

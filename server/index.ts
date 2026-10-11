@@ -30,7 +30,7 @@ const date = z.union([z.literal(""), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "ex
 const ContactPatch = z
   .object(Object.fromEntries(CONTACT_FIELDS.map((f) => [f, z.string().max(20000)])) as Record<ContactField, z.ZodString>)
   .partial()
-  .extend({ last_contacted: date.optional(), follow_up_date: date.optional() })
+  .extend({ last_contacted: date.optional(), follow_up_date: date.optional(), in_network: z.boolean().optional() })
   .strict();
 const NewContact = ContactPatch.extend({ name: z.string().trim().min(1, "Name is required") });
 const idParam = (raw: string) => z.coerce.number().int().positive().parse(raw);
@@ -64,6 +64,12 @@ app.get("/api/contacts", (c) => c.json(db.listContacts()));
 
 app.post("/api/contacts", async (c) => {
   const body = NewContact.parse(await c.req.json());
+  // Adding someone who is already known as a connection brings them into your network instead of duplicating them.
+  const existing = body.in_network !== false ? db.findByName(body.name) : undefined;
+  if (existing && !existing.in_network) {
+    db.updateContact(existing.id, { ...body, name: undefined, in_network: true });
+    return c.json(db.getContact(existing.id), 200);
+  }
   const id = db.createContact(body);
   return c.json(db.getContact(id), 201);
 });
@@ -115,7 +121,7 @@ app.post("/api/import", async (c) => {
   const body = z
     .object({
       csv: z.string(),
-      category: z.string().optional(),
+      role: z.string().optional(),
       mapping: z.record(z.string(), z.enum([...CONTACT_FIELDS, "related", "updated", "ignore"])).optional(),
     })
     .parse(await c.req.json());
@@ -123,15 +129,16 @@ app.post("/api/import", async (c) => {
 });
 
 app.get("/api/export.csv", (c) => {
-  const header = ["Name", "Category", "Role", "Department", "Schools", "Research", "Website", "Email", "Related to", "Last contacted", "Follow-up date", "Notes", "Updated"];
+  const header = ["Name", "In network", "Role", "Department", "Schools", "Current school", "Research", "Website", "Email", "Related to", "Last contacted", "Follow-up date", "Notes", "Updated"];
   const rows = db
     .listContacts()
     .map((x) => [
       x.name,
-      x.category,
+      x.in_network ? "yes" : "no",
       x.role,
       x.department,
       x.schools,
+      x.current_school,
       x.research,
       x.website,
       x.email,

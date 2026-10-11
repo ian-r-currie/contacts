@@ -6,10 +6,10 @@ import { config } from "./config.ts";
 /** Editable text fields on a contact, in display order. */
 export const CONTACT_FIELDS = [
   "name",
-  "category",
   "role",
   "department",
   "schools",
+  "current_school",
   "research",
   "website",
   "email",
@@ -23,8 +23,9 @@ export type ContactField = (typeof CONTACT_FIELDS)[number];
 export const RESEARCHABLE_FIELDS = ["name", "role", "department", "schools", "research", "website", "email"] as const;
 export type ResearchableField = (typeof RESEARCHABLE_FIELDS)[number];
 
-export type Contact = { id: number; created_at: string; updated_at: string } & Record<ContactField, string>;
-export type Relation = { id: number; name: string; note: string };
+/** in_network is false for people who only appear as someone's connection (not tracked as contacts). */
+export type Contact = { id: number; in_network: boolean; created_at: string; updated_at: string } & Record<ContactField, string>;
+export type Relation = { id: number; name: string; note: string; in_network: boolean };
 export type ContactWithRelations = Contact & { related: Relation[] };
 
 export type ResearchRun = {
@@ -40,16 +41,24 @@ export type ResearchRun = {
   error: string;
 };
 
+export type ContactInput = Partial<Record<ContactField, string>> & { in_network?: boolean };
 export type DB = ReturnType<typeof openDb>;
+
+export const splitSchools = (schools: string) =>
+  schools
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS contacts (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
-  category TEXT NOT NULL DEFAULT '',
+  in_network INTEGER NOT NULL DEFAULT 1,
   role TEXT NOT NULL DEFAULT '',
   department TEXT NOT NULL DEFAULT '',
   schools TEXT NOT NULL DEFAULT '',
+  current_school TEXT NOT NULL DEFAULT '',
   research TEXT NOT NULL DEFAULT '',
   website TEXT NOT NULL DEFAULT '',
   email TEXT NOT NULL DEFAULT '',
@@ -104,6 +113,7 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
   if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+  migrate(db);
   db.exec(SCHEMA);
 
   // A crashed server can leave runs marked running forever.
@@ -111,20 +121,20 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
 
   const rowToContact = (row: Record<string, unknown>): Contact => {
     const { follow_up_notified: _ignored, ...rest } = row;
-    return rest as unknown as Contact;
+    return { ...rest, in_network: Boolean(row.in_network) } as unknown as Contact;
   };
 
   function relationsFor(ids: number[]): Map<number, Relation[]> {
     const map = new Map<number, Relation[]>(ids.map((id) => [id, []]));
     const rows = db
       .prepare(
-        `SELECT r.a_id AS self, c.id, c.name, r.note FROM relationships r JOIN contacts c ON c.id = r.b_id
+        `SELECT r.a_id AS self, c.id, c.name, c.in_network, r.note FROM relationships r JOIN contacts c ON c.id = r.b_id
          UNION ALL
-         SELECT r.b_id AS self, c.id, c.name, r.note FROM relationships r JOIN contacts c ON c.id = r.a_id
+         SELECT r.b_id AS self, c.id, c.name, c.in_network, r.note FROM relationships r JOIN contacts c ON c.id = r.a_id
          ORDER BY name COLLATE NOCASE`,
       )
-      .all() as { self: number; id: number; name: string; note: string }[];
-    for (const r of rows) map.get(r.self)?.push({ id: r.id, name: r.name, note: r.note });
+      .all() as { self: number; id: number; name: string; in_network: number; note: string }[];
+    for (const r of rows) map.get(r.self)?.push({ id: r.id, name: r.name, note: r.note, in_network: Boolean(r.in_network) });
     return map;
   }
 
@@ -156,27 +166,43 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
       return { ...rowToContact(row), related: relationsFor([id]).get(id) ?? [] };
     },
 
-    createContact(fields: Partial<Record<ContactField, string>> & { name: string }, updatedAt?: string): number {
+    createContact(fields: ContactInput & { name: string }, updatedAt?: string): number {
       const cols = CONTACT_FIELDS.filter((f) => fields[f] !== undefined);
       const ts = updatedAt ?? now();
       const result = db
         .prepare(
-          `INSERT INTO contacts (${[...cols, "created_at", "updated_at"].join(", ")})
-           VALUES (${[...cols, "", ""].map(() => "?").join(", ")})`,
+          `INSERT INTO contacts (${[...cols, "in_network", "created_at", "updated_at"].join(", ")})
+           VALUES (${[...cols, "", "", ""].map(() => "?").join(", ")})`,
         )
-        .run(...cols.map((f) => fields[f]!.trim()), ts, ts);
+        .run(...cols.map((f) => fields[f]!.trim()), fields.in_network === false ? 0 : 1, ts, ts);
       return Number(result.lastInsertRowid);
     },
 
-    updateContact(id: number, fields: Partial<Record<ContactField, string>>): boolean {
-      const cols = CONTACT_FIELDS.filter((f) => fields[f] !== undefined);
+    findByName(name: string): Contact | undefined {
+      const row = db.prepare("SELECT * FROM contacts WHERE name = ? COLLATE NOCASE ORDER BY in_network DESC LIMIT 1").get(name.trim()) as
+        | Record<string, unknown>
+        | undefined;
+      return row && rowToContact(row);
+    },
+
+    updateContact(id: number, fields: ContactInput): boolean {
+      const values: Record<string, string | number> = {};
+      for (const f of CONTACT_FIELDS) if (fields[f] !== undefined) values[f] = fields[f]!.trim();
+      if (fields.in_network !== undefined) values.in_network = fields.in_network ? 1 : 0;
+      // Editing the school list drops a current school that is no longer in it.
+      if (values.schools !== undefined && values.current_school === undefined) {
+        const current = (db.prepare("SELECT current_school FROM contacts WHERE id = ?").get(id) as { current_school: string } | undefined)
+          ?.current_school;
+        if (current && !splitSchools(values.schools as string).some((s) => s.toLowerCase() === current.toLowerCase())) values.current_school = "";
+      }
+      const cols = Object.keys(values);
       if (cols.length === 0) return api.getContact(id) !== undefined;
       const sets = cols.map((f) => `${f} = ?`);
       // Changing the follow-up date re-arms its notification.
       if (cols.includes("follow_up_date")) sets.push("follow_up_notified = ''");
       const result = db
         .prepare(`UPDATE contacts SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`)
-        .run(...cols.map((f) => fields[f]!.trim()), now(), id);
+        .run(...cols.map((f) => values[f]), now(), id);
       return result.changes > 0;
     },
 
@@ -270,6 +296,35 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
     },
   };
   return api;
+}
+
+/**
+ * Upgrades databases created by earlier versions:
+ * v1: "category" folds into "role" (Professor etc.), adds current_school and in_network.
+ */
+function migrate(db: DatabaseSync) {
+  const version = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  const hasContacts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'contacts'").get();
+  if (!hasContacts) {
+    db.exec("PRAGMA user_version = 1");
+    return;
+  }
+  if (version < 1) {
+    db.exec("BEGIN");
+    db.exec(`
+      ALTER TABLE contacts ADD COLUMN in_network INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE contacts ADD COLUMN current_school TEXT NOT NULL DEFAULT '';
+      UPDATE contacts SET role = category WHERE role = '' AND category NOT IN ('', 'Contact');
+      ALTER TABLE contacts DROP COLUMN category;
+      -- Name-only people who exist because someone listed them under "Related to".
+      UPDATE contacts SET in_network = 0
+        WHERE role = '' AND department = '' AND schools = '' AND research = '' AND website = '' AND email = ''
+          AND notes = '' AND last_contacted = '' AND follow_up_date = ''
+          AND id IN (SELECT a_id FROM relationships UNION SELECT b_id FROM relationships);
+      PRAGMA user_version = 1;
+    `);
+    db.exec("COMMIT");
+  }
 }
 
 function parseRun(row: Record<string, unknown>): ResearchRun {
