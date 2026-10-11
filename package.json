@@ -1,0 +1,39 @@
+{
+  "name": "contacts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal contact tracker with a research agent",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx watch server/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "NODE_ENV=production NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/index.ts",
+    "import": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/import-cli.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json",
+    "test": "NODE_OPTIONS=--disable-warning=ExperimentalWarning node --test --import tsx server/*.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
+    "@hono/node-server": "^2.1.4",
+    "hono": "^4.13.13",
+    "tsx": "^4.23.15",
+    "web-push": "^3.6.7",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/web-push": "^3.6.4",
+    "@vitejs/plugin-react": "^6.1.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}

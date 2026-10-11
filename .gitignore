@@ -31,3 +31,13 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Node / build output
+node_modules/
+dist/
+
+# Personal data: the database and any CSV exports never go to GitHub
+data/
+*.db
+*.db-*
+*.csv
