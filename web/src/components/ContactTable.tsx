@@ -67,7 +67,7 @@ export function ContactTable({ contacts, columns, sort, onSort, selectedId, onOp
             </button>
             <button
               className="icon-btn research-btn"
-              title={researchEnabled ? "Research this person" : "Research agent (needs ANTHROPIC_API_KEY)"}
+              title={researchEnabled ? "Research this person" : "Research agent (needs GEMINI_API_KEY)"}
               aria-label={`Research ${c.name}`}
               onClick={() => onOpen(c.id, "research")}
             >

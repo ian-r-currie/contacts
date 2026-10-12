@@ -18,7 +18,7 @@
     "test": "NODE_OPTIONS=--disable-warning=ExperimentalWarning node --test --import tsx server/*.test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.133.0",
+    "@google/genai": "^2.28.0",
     "@hono/node-server": "^2.1.4",
     "hono": "^4.13.13",
     "tsx": "^4.23.15",

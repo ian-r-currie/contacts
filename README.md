@@ -12,7 +12,7 @@ A personal contact tracker for keeping up with people you meet: students, profes
 - **Current organization.** When someone has several organizations, click one to mark it as current (where they are now). You can mark more than one, e.g. their current school and lab. With a single organization, that one is current.
 - **Last contacted.** A **✓ Contacted today** button also clears a follow-up that has come due.
 - **Follow-up reminders.** Due and overdue follow-ups are highlighted, have their own filter, and send a push notification to your browser or phone.
-- **Research agent (✦).** Open a contact's side panel and press **Research**. A Claude agent searches the web, fills in empty fields automatically, and lists anything that differs from what you have so you can accept or dismiss it. It also cites its sources. Research keeps running if you close the panel.
+- **Research agent (✦).** Open a contact's side panel and press **Research**. A Gemini agent searches the web, fills in empty fields automatically, and lists anything that differs from what you have so you can accept or dismiss it. It also cites its sources. Research keeps running if you close the panel.
 - **CSV import and export.** Import maps your sheet's columns and merges by name without overwriting anything.
 - **Works on your phone.** The layout is responsive and the app can be installed (PWA).
 
@@ -24,7 +24,7 @@ Requires Node.js 22.13 or newer.
 
 ```bash
 npm install
-cp .env.example .env          # then add ANTHROPIC_API_KEY to enable research
+cp .env.example .env          # then add GEMINI_API_KEY to enable research
 npm run build
 npm start                     # http://localhost:8787
 ```
@@ -58,7 +58,14 @@ You can delete the CSV files afterwards. The database is the source of truth.
 
 Both people and organizations have a **✦ Research** tab (also the ✦ next to each name in the tables).
 
-Set `ANTHROPIC_API_KEY` in `.env` and restart the server. The agent uses Claude (`claude-sonnet-5-5`, the latest Sonnet, by default; override it with `RESEARCH_MODEL`) with web search and web fetch. It can fill in name, role, department, organizations, research, website and email:
+The agent uses Google's Gemini API, which has a free tier:
+
+1. Create a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). You sign in with a Google account; no credit card is needed.
+2. Put it in `.env` as `GEMINI_API_KEY=…` and restart the server.
+
+It uses `gemini-2.5-flash` by default; change it with `RESEARCH_MODEL`. On the free tier, Google Search grounding is only included for the 2.5 Flash models (`gemini-2.5-flash`, `gemini-2.5-flash-lite`), and requests are rate-limited, so expect an occasional "rate limit reached" if you research many people in a row. Your project's current limits are shown in AI Studio.
+
+Each run makes two Gemini calls: one searches the web (Google Search and page reading) and writes notes with sources, the second turns the notes into the fields below. The agent can fill in name, role, department, organizations, research, website and email:
 
 - **Empty fields** are filled automatically.
 - **Fields you already have** become suggestions, never silent overwrites.
@@ -67,7 +74,7 @@ Set `ANTHROPIC_API_KEY` in `.env` and restart the server. The agent uses Claude 
 
 For organizations, it fills in the name (replacing a placeholder like a bare domain), type, website, description and the organization it's part of, on the same terms. It is given the names of organizations you already have, so it reuses them instead of creating near-duplicates.
 
-Every run is saved with its summary and sources in the contact's Research tab. Server-side refusal fallback is enabled, so if a request is declined by a safety classifier, the API retries it on a fallback model instead of failing the run.
+Every run is saved with its summary and sources in the Research tab. Note that on the free tier Google may use your prompts to improve its products, so the names and details you research are shared with Google.
 
 ## Follow-up notifications
 
@@ -99,7 +106,7 @@ The server is one Node process plus one SQLite file, so any small host works. **
 server/            Node + Hono API (TypeScript, run with tsx)
   db.ts            SQLite schema and queries (node:sqlite, no native deps)
   importer.ts      CSV import with column mapping and relationship resolution
-  research.ts      Research agent (Claude API, web search/fetch, streaming progress)
+  research.ts      Research agent (Gemini API with Google Search grounding, streaming progress)
   notify.ts        Web Push + follow-up scheduler
   auth.ts          Optional password login
 web/               React + Vite frontend

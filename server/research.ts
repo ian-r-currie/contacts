@@ -1,6 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { ApiError, GoogleGenAI } from "@google/genai";
 import { z } from "zod";
-import { config, hasAnthropicCredentials } from "./config.ts";
+import { config, hasResearchCredentials } from "./config.ts";
 import {
   RESEARCHABLE_FIELDS,
   splitList,
@@ -45,7 +45,7 @@ export function startResearch(db: DB, subject: Subject, instructions = ""): Job 
 
   const target = subject.kind === "org" ? db.getOrg(subject.id) : db.getContact(subject.id);
   if (!target) throw new Error(subject.kind === "org" ? "Organization not found" : "Contact not found");
-  if (!hasAnthropicCredentials()) throw new Error("Set ANTHROPIC_API_KEY in .env to use the research agent.");
+  if (!hasResearchCredentials()) throw new Error("Set GEMINI_API_KEY in .env to use the research agent.");
 
   const job: Job = { runId: db.startRun(subject), subject, events: [], listeners: new Set(), finished: false };
   jobs.set(jobKey(subject), job);
@@ -60,10 +60,10 @@ export function startResearch(db: DB, subject: Subject, instructions = ""): Job 
 
   const work =
     subject.kind === "org"
-      ? runAgent(ORG_AGENT.system, orgPrompt(db, target as OrgWithMembers, instructions), ORG_AGENT.tool, OrgFindingsSchema, emit).then((f) =>
+      ? runAgent(ORG_AGENT, orgPrompt(db, target as OrgWithMembers, instructions), OrgFindingsSchema, emit).then((f) =>
           applyOrgFindings(db, job.runId, subject.id, f),
         )
-      : runAgent(PERSON_AGENT.system, personPrompt(db, target as ContactWithRelations, instructions), PERSON_AGENT.tool, PersonFindingsSchema, emit).then(
+      : runAgent(PERSON_AGENT, personPrompt(db, target as ContactWithRelations, instructions), PersonFindingsSchema, emit).then(
           (f) => applyPersonFindings(db, job.runId, subject.id, f),
         );
   work
@@ -80,35 +80,27 @@ export function startResearch(db: DB, subject: Subject, instructions = ""): Job 
 // Shared pieces
 
 const SourcesSchema = z.array(z.object({ url: z.string(), title: z.string() }));
-const SOURCES_JSON = {
-  type: "array",
-  description: "Pages that support the findings.",
-  items: {
-    type: "object",
-    additionalProperties: false,
-    required: ["url", "title"],
-    properties: { url: { type: "string" }, title: { type: "string" } },
-  },
-};
-const nullableText = (description: string) => ({ type: ["string", "null"], description: `${description} null if not found with confidence.` });
+/** A research agent: what to look for (step 1, with web search) and the JSON shape to extract (step 2). */
+type Agent = { system: string; schema: Record<string, unknown> };
 
-function saveTool(about: string, fields: Record<string, unknown>, summary: string): Anthropic.Beta.BetaTool {
+const textField = (description: string) => ({ type: "string", description: `${description} Empty string if not found with confidence.` });
+
+function findingsSchema(fields: Record<string, unknown>, summary: string) {
   return {
-    name: "save_findings",
-    description: `Record the verified details about this ${about}. Call exactly once, when research is complete.`,
-    strict: true,
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["fields", "summary", "sources"],
-      properties: {
-        fields: { type: "object", additionalProperties: false, required: Object.keys(fields), properties: fields },
-        summary: { type: "string", description: summary },
-        sources: SOURCES_JSON,
-      },
+    type: "object",
+    properties: {
+      fields: { type: "object", properties: fields, required: Object.keys(fields) },
+      summary: { type: "string", description: summary },
     },
+    required: ["fields", "summary"],
   };
 }
+
+/** Field list for the research instructions. */
+const describeFields = (guide: Record<string, string>) =>
+  Object.entries(guide)
+    .map(([f, d]) => `- ${f}: ${d}`)
+    .join("\n");
 
 /** Organization names already in the list, so the agent reuses them instead of inventing variants. */
 function knownOrgNames(db: DB): string {
@@ -118,73 +110,91 @@ function knownOrgNames(db: DB): string {
 
 const clean = (v: string | null | undefined) => (v ?? "").trim();
 
-/** Runs a research conversation until the model calls save_findings with input matching `schema`. */
-async function runAgent<T>(
-  system: string,
-  prompt: string,
-  tool: Anthropic.Beta.BetaTool,
-  schema: z.ZodType<T>,
-  emit: (e: ResearchEvent) => void,
-): Promise<T> {
-  const client = new Anthropic();
-  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: prompt }];
-  emit({ type: "status", text: "Starting research…" });
+/**
+ * Two Gemini calls: the first searches the web (Google Search + URL context grounding) and writes research notes,
+ * the second turns those notes into JSON matching the agent's schema. Search and structured output are kept apart
+ * because combining them in one request isn't supported on every model.
+ */
+async function runAgent<T>(agent: Agent, prompt: string, schema: z.ZodType<T>, emit: (e: ResearchEvent) => void): Promise<T> {
+  const ai = new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+    // Only for pointing at a proxy or a local stand-in; normally unset.
+    ...(process.env.GEMINI_BASE_URL ? { httpOptions: { baseUrl: process.env.GEMINI_BASE_URL } } : {}),
+  });
+  emit({ type: "status", text: "Searching the web…" });
 
-  for (let turn = 0; turn < 12; turn++) {
-    const stream = client.beta.messages.stream({
-      model: config.anthropicModel,
-      max_tokens: 64000,
-      betas: ["server-side-fallback-2026-07-01", "thinking-display-updates-2026-08-18"],
-      // On a safety-classifier refusal, the API retries on a fallback model instead of failing the run.
-      fallbacks: "default",
-      thinking: { type: "adaptive", display: "updates" },
-      output_config: { effort: "medium" },
-      system,
-      tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 8 }, { type: "web_fetch_20260209", name: "web_fetch", max_uses: 8 }, tool],
-      messages,
-    });
+  const stream = await ai.models.generateContentStream({
+    model: config.researchModel,
+    contents: prompt,
+    config: {
+      systemInstruction: agent.system,
+      tools: [{ googleSearch: {} }, { urlContext: {} }],
+      thinkingConfig: { includeThoughts: true },
+    },
+  });
 
-    let progress = "";
-    stream.on("thinking", (delta) => {
-      progress += delta;
-    });
-    stream.on("contentBlock", (block) => {
-      if (block.type === "thinking" && progress.trim()) emit({ type: "progress", text: progress.trim() });
-      progress = "";
-      if (block.type === "server_tool_use") {
-        const input = block.input as { query?: string; url?: string };
-        if (block.name === "web_search" && input.query) emit({ type: "search", query: input.query });
-        if (block.name === "web_fetch" && input.url) emit({ type: "fetch", url: input.url });
+  let notes = "";
+  const queries = new Set<string>();
+  const fetched = new Set<string>();
+  const sources = new Map<string, string>();
+  for await (const chunk of stream) {
+    const candidate = chunk.candidates?.[0];
+    for (const part of candidate?.content?.parts ?? []) {
+      if (!part.text) continue;
+      if (part.thought) {
+        const text = part.text.replace(/\*\*/g, "").trim();
+        if (text) emit({ type: "progress", text: text.length > 240 ? `${text.slice(0, 239)}…` : text });
+      } else notes += part.text;
+    }
+    for (const q of candidate?.groundingMetadata?.webSearchQueries ?? []) {
+      if (queries.has(q)) continue;
+      queries.add(q);
+      emit({ type: "search", query: q });
+    }
+    for (const c of candidate?.groundingMetadata?.groundingChunks ?? []) {
+      if (c.web?.uri) sources.set(c.web.uri, c.web.title ?? c.web.uri);
+    }
+    for (const m of candidate?.urlContextMetadata?.urlMetadata ?? []) {
+      if (m.retrievedUrl && !fetched.has(m.retrievedUrl)) {
+        fetched.add(m.retrievedUrl);
+        sources.set(m.retrievedUrl, m.retrievedUrl.replace(/^https?:\/\//, ""));
+        emit({ type: "fetch", url: m.retrievedUrl });
       }
-      if (block.type === "text" && block.text.trim()) emit({ type: "progress", text: block.text.trim() });
-    });
-
-    const message = await stream.finalMessage();
-
-    if (message.stop_reason === "refusal") throw new Error("The model declined to research this request.");
-    if (message.stop_reason === "pause_turn") {
-      messages.push({ role: "assistant", content: message.content });
-      continue;
     }
-
-    const call = message.content.find((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use" && b.name === tool.name);
-    if (call) {
-      const parsed = schema.safeParse(call.input);
-      if (parsed.success) return parsed.data;
-      if (message.stop_reason === "max_tokens") throw new Error("The research response was cut off.");
-      messages.push({ role: "assistant", content: message.content });
-      messages.push({
-        role: "user",
-        content: [{ type: "tool_result", tool_use_id: call.id, is_error: true, content: `Invalid input: ${parsed.error.message}. Call save_findings again.` }],
-      });
-      continue;
-    }
-
-    // Ended without saving: nudge once more.
-    messages.push({ role: "assistant", content: message.content });
-    messages.push({ role: "user", content: "Please call save_findings now with what you found (use null for anything not found)." });
   }
-  throw new Error("Research did not finish within the turn limit.");
+  if (!notes.trim()) throw new Error("Gemini returned no findings. Try again, or add a hint.");
+
+  emit({ type: "status", text: "Organizing what was found…" });
+  let lastError = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await ai.models.generateContent({
+      model: config.researchModel,
+      contents: `${prompt}\n\nResearch notes:\n${notes}`,
+      config: {
+        systemInstruction:
+          "Extract the details from the research notes into the JSON format. Use only facts stated in the notes; use an empty string (or an empty list) for anything the notes don't establish.",
+        responseMimeType: "application/json",
+        responseJsonSchema: agent.schema,
+      },
+    });
+    try {
+      const raw = JSON.parse(res.text ?? "") as { fields?: Record<string, unknown>; summary?: string };
+      // Empty strings / lists mean "not found".
+      const fields = Object.fromEntries(
+        Object.entries(raw.fields ?? {}).map(([k, v]) => [k, v === "" || (Array.isArray(v) && v.length === 0) ? null : typeof v === "string" ? v.trim() : v]),
+      );
+      const parsed = schema.safeParse({
+        fields,
+        summary: raw.summary ?? "",
+        sources: [...sources].slice(0, 12).map(([url, title]) => ({ url, title })),
+      });
+      if (parsed.success) return parsed.data;
+      lastError = parsed.error.message;
+    } catch (err) {
+      lastError = (err as Error).message;
+    }
+  }
+  throw new Error(`Couldn't read Gemini's answer (${lastError}).`);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -213,24 +223,24 @@ const PERSON_GUIDE: Record<ResearchableField, string> = {
   email: "Public email address, only if explicitly published by the person or their institution. Never guess a pattern.",
 };
 
-const PERSON_AGENT = {
+const PERSON_AGENT: Agent = {
   system: `You research people for a personal contacts list kept by a student who networks with researchers and academics (mostly around the University of Toronto).
 
-Use web search and web fetch to find accurate, current public information about the person described. Disambiguate carefully: use the known details (organizations, department, related people, website) to make sure every finding is about this same person. Prefer official sources (personal sites, university and lab pages, Google Scholar). If a known detail looks outdated or wrong, report what you found.
+Search the web for accurate, current public information about the person described. Disambiguate carefully: use the known details (organizations, department, related people, website) to make sure every finding is about this same person. Prefer official sources (personal sites, university and lab pages, Google Scholar). If a known detail looks outdated or wrong, say what you found.
 
-When finished, call save_findings exactly once. Set a field to null when you could not find it with confidence. Do not invent or infer email addresses.`,
-  tool: saveTool(
-    "person",
+Write concise research notes with, for each detail below, the value and the page it came from, or "not found":
+${describeFields(PERSON_GUIDE)}
+Do not invent or infer email addresses. End with a 2-4 sentence background on the person, useful before reaching out.`,
+  schema: findingsSchema(
     {
-      ...Object.fromEntries(TEXT_FIELDS.map((f) => [f, nullableText(PERSON_GUIDE[f])])),
+      ...Object.fromEntries(TEXT_FIELDS.map((f) => [f, textField(PERSON_GUIDE[f])])),
       organizations: {
-        type: ["array", "null"],
-        description: `${PERSON_GUIDE.organizations} null if none found with confidence.`,
+        type: "array",
+        description: `${PERSON_GUIDE.organizations} Empty list if none found.`,
         items: {
           type: "object",
-          additionalProperties: false,
-          required: ["name", "type", "current"],
           properties: { name: { type: "string" }, type: { type: "string" }, current: { type: "boolean" } },
+          required: ["name", "type", "current"],
         },
       },
     },
@@ -305,16 +315,17 @@ const ORG_GUIDE: Record<OrgResearchField, string> = {
   parent: 'The larger organization it is part of, if any (e.g. a lab\'s university, a campus\'s university). Use the full official name.',
 };
 
-const ORG_AGENT = {
+const ORG_AGENT: Agent = {
   system: `You research organizations (schools, campuses, labs, institutes, companies, groups) for a personal contacts list kept by a student who networks with researchers and academics (mostly around the University of Toronto).
 
-Use web search and web fetch to find accurate, current public information about the organization described. Use the known details (website, parent organization, members) to make sure every finding is about this same organization. Prefer the organization's own pages. If a known detail looks outdated or wrong, report what you found.
+Search the web for accurate, current public information about the organization described. Use the known details (website, parent organization, members) to make sure every finding is about this same organization. Prefer the organization's own pages. If a known detail looks outdated or wrong, say what you found.
 
-When finished, call save_findings exactly once. Set a field to null when you could not find it with confidence.`,
-  tool: saveTool(
-    "organization",
-    Object.fromEntries(ORG_RESEARCHABLE.map((f) => [f, nullableText(ORG_GUIDE[f])])),
-    "2-3 sentence plain-text overview of the organization, useful when deciding who to reach out to there.",
+Write concise research notes with, for each detail below, the value and the page it came from, or "not found":
+${describeFields(ORG_GUIDE)}
+End with a 2-3 sentence overview of the organization, useful when deciding who to reach out to there.`,
+  schema: findingsSchema(
+    Object.fromEntries(ORG_RESEARCHABLE.map((f) => [f, textField(ORG_GUIDE[f])])),
+    "2-3 sentence plain-text overview of the organization.",
   ),
 };
 
@@ -437,8 +448,11 @@ function parseOrgs(text: string): OrgRef[] {
 }
 
 function describeError(err: unknown): string {
-  if (err instanceof Anthropic.AuthenticationError) return "Anthropic API key was rejected. Check ANTHROPIC_API_KEY in .env.";
-  if (err instanceof Anthropic.RateLimitError) return "Rate limited by the Anthropic API. Try again in a minute.";
-  if (err instanceof Anthropic.APIError) return `Anthropic API error ${err.status ?? ""}: ${err.message}`;
+  if (err instanceof ApiError) {
+    if (err.status === 429) return "Gemini's rate limit was reached (the free tier allows a limited number of searches per minute and per day). Try again later.";
+    if (err.status === 400 && /api key/i.test(err.message)) return "Gemini rejected the API key. Check GEMINI_API_KEY in .env.";
+    if (err.status === 401 || err.status === 403) return "Gemini rejected the API key. Check GEMINI_API_KEY in .env.";
+    return `Gemini API error ${err.status}: ${err.message}`;
+  }
   return err instanceof Error ? err.message : String(err);
 }

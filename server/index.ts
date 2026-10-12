@@ -6,7 +6,7 @@ import { getCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import { createAuth } from "./auth.ts";
-import { config, hasAnthropicCredentials, today } from "./config.ts";
+import { config, hasResearchCredentials, today } from "./config.ts";
 import { toCsv } from "./csv.ts";
 import { CONTACT_FIELDS, ORG_FIELDS, RESEARCHABLE_FIELDS, openDb, type ContactField, type OrgField, type Subject } from "./db.ts";
 import { importCsv, importOrgsCsv, previewCsv } from "./importer.ts";
@@ -62,7 +62,7 @@ app.post("/api/logout", (c) => {
 });
 
 app.get("/api/config", (c) =>
-  c.json({ researchEnabled: hasAnthropicCredentials(), vapidPublicKey, today: today(), researchableFields: RESEARCHABLE_FIELDS }),
+  c.json({ researchEnabled: hasResearchCredentials(), vapidPublicKey, today: today(), researchableFields: RESEARCHABLE_FIELDS }),
 );
 
 // --- contacts ---
@@ -317,7 +317,7 @@ startScheduler(db);
 
 serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   console.log(`Contacts API listening on http://${config.host === "0.0.0.0" ? "localhost" : info.address}:${info.port}`);
-  if (!hasAnthropicCredentials()) console.log("Research agent disabled: set ANTHROPIC_API_KEY in .env to enable it.");
+  if (!hasResearchCredentials()) console.log("Research agent disabled: set GEMINI_API_KEY in .env to enable it (free key: https://aistudio.google.com/apikey).");
   if (config.host !== "127.0.0.1" && config.host !== "localhost" && !config.appPassword) {
     console.warn("WARNING: listening beyond localhost without APP_PASSWORD. Anyone who can reach this port can read your contacts.");
   }

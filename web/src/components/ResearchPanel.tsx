@@ -95,8 +95,11 @@ export function ResearchPanel({ target, enabled, onChanged, onAddToNotes, notify
           The research agent searches the web for this {what} and fills in details you don't have yet ({target.fieldsBlurb}).
         </p>
         <p className="callout">
-          To turn it on, add <code>ANTHROPIC_API_KEY=…</code> to the <code>.env</code> file next to <code>package.json</code> and restart the
-          server.
+          To turn it on, get a free Gemini API key at{" "}
+          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">
+            aistudio.google.com/apikey
+          </a>
+          , add <code>GEMINI_API_KEY=…</code> to the <code>.env</code> file next to <code>package.json</code>, and restart the server.
         </p>
       </div>
     );
