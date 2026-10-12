@@ -106,6 +106,7 @@ export function DetailPanel({ contact: c, contacts, orgs, tab, onTab, onClose, o
             )}
 
             {field("role", { list: "role-options" })}
+            {field("relationship_status", { list: "status-options" })}
             {field("department")}
             <div className="field">
               <label>{LABELS.orgs}</label>
@@ -176,7 +177,20 @@ export function DetailPanel({ contact: c, contacts, orgs, tab, onTab, onClose, o
             </footer>
           </>
         ) : (
-          <ResearchPanel contact={c} enabled={researchEnabled} onChanged={onChanged} onUpdate={onUpdate} notify={notify} />
+          <ResearchPanel
+            target={{
+              kind: "contact",
+              id: c.id,
+              name: c.name,
+              values: { ...c, organizations: c.orgs.map((o) => o.name).join(", ") } as unknown as Record<string, string>,
+              labels: LABELS,
+              fieldsBlurb: "role, department, organizations, research, website, email",
+            }}
+            enabled={researchEnabled}
+            onChanged={onChanged}
+            onAddToNotes={(summary) => onUpdate(c.id, { notes: [c.notes, summary].filter(Boolean).join("\n\n") })}
+            notify={notify}
+          />
         )}
       </div>
     </aside>

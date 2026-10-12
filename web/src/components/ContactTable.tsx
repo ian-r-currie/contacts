@@ -9,6 +9,7 @@ export type SortKey = Column;
 export const ALL_COLUMNS: Column[] = [
   "name",
   "role",
+  "relationship_status",
   "department",
   "orgs",
   "research",
@@ -23,6 +24,7 @@ export const ALL_COLUMNS: Column[] = [
 export const DEFAULT_COLUMNS: Column[] = [
   "name",
   "role",
+  "relationship_status",
   "department",
   "orgs",
   "research",
@@ -95,6 +97,8 @@ export function ContactTable({ contacts, columns, sort, onSort, selectedId, onOp
         return <span className="muted">{formatDate(c.updated_at)}</span>;
       case "role":
         return <EditableCell value={c.role} onSave={save} list="role-options" />;
+      case "relationship_status":
+        return <EditableCell value={c.relationship_status} onSave={save} list="status-options" display={<span className="tag status">{c.relationship_status}</span>} />;
       case "orgs":
         return (
           <EditableCell

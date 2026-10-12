@@ -8,10 +8,10 @@ import { z } from "zod";
 import { createAuth } from "./auth.ts";
 import { config, hasAnthropicCredentials, today } from "./config.ts";
 import { toCsv } from "./csv.ts";
-import { CONTACT_FIELDS, ORG_FIELDS, RESEARCHABLE_FIELDS, openDb, type ContactField, type OrgField } from "./db.ts";
+import { CONTACT_FIELDS, ORG_FIELDS, RESEARCHABLE_FIELDS, openDb, type ContactField, type OrgField, type Subject } from "./db.ts";
 import { importCsv, importOrgsCsv, previewCsv } from "./importer.ts";
 import { initPush, sendToAll, startScheduler } from "./notify.ts";
-import { acceptSuggestions, dismissSuggestions, getJob, startResearch, subscribe } from "./research.ts";
+import { ORG_RESEARCHABLE, acceptSuggestions, dismissSuggestions, getJob, startResearch, subscribe } from "./research.ts";
 
 const db = openDb();
 const auth = createAuth(db);
@@ -161,10 +161,12 @@ app.delete("/api/contacts/:id", (c) => {
 app.put("/api/contacts/:id/related/:otherId", async (c) => {
   const id = idParam(c.req.param("id"));
   const other = idParam(c.req.param("otherId"));
-  const { note } = z.object({ note: z.string().max(500).optional() }).parse(await c.req.json().catch(() => ({})));
+  const details = z
+    .object({ note: z.string().max(500).optional(), kind: z.string().max(60).optional() })
+    .parse(await c.req.json().catch(() => ({})));
   if (!db.getContact(id) || !db.getContact(other)) return c.json({ error: "Not found" }, 404);
   if (id === other) return c.json({ error: "A contact can't be related to itself" }, 400);
-  db.relate(id, other, note);
+  db.relate(id, other, details);
   return c.json(db.getContact(id));
 });
 
@@ -198,13 +200,14 @@ app.post("/api/import", async (c) => {
 });
 
 app.get("/api/export.csv", (c) => {
-  const header = ["Name", "In network", "Role", "Department", "Organizations", "Research", "Website", "Email", "Related to", "Last contacted", "Follow-up date", "Notes", "Updated"];
+  const header = ["Name", "In network", "Role", "Relationship status", "Department", "Organizations", "Research", "Website", "Email", "Related to", "Last contacted", "Follow-up date", "Notes", "Updated"];
   const rows = db
     .listContacts()
     .map((x) => [
       x.name,
       x.in_network ? "yes" : "no",
       x.role,
+      x.relationship_status,
       x.department,
       x.orgs.map((o) => (o.current ? `${o.name} (current)` : o.name)).join(", "),
       x.research,
@@ -238,22 +241,26 @@ app.get("/api/export-orgs.csv", (c) => {
   return c.body(toCsv([["Name", "Type", "Part of", "Website", "Description", "People", "Notes"], ...rows]));
 });
 
-// --- research agent ---
-app.get("/api/contacts/:id/research", (c) => {
-  const id = idParam(c.req.param("id"));
-  const job = getJob(id);
-  return c.json({ runs: db.listRuns(id), running: job && !job.finished ? job.runId : null });
+app.get("/api/relation-kinds", (c) => c.json(db.relationKinds()));
+
+// --- research agent (people: /api/contacts/:id/research, organizations: /api/orgs/:id/research) ---
+const subjectOf = (kind: string, id: string): Subject => ({ kind: kind === "orgs" ? "org" : "contact", id: idParam(id) });
+
+app.get("/api/:kind{contacts|orgs}/:id/research", (c) => {
+  const subject = subjectOf(c.req.param("kind"), c.req.param("id"));
+  const job = getJob(subject);
+  return c.json({ runs: db.listRuns(subject), running: job && !job.finished ? job.runId : null });
 });
 
-app.post("/api/contacts/:id/research", async (c) => {
-  const id = idParam(c.req.param("id"));
+app.post("/api/:kind{contacts|orgs}/:id/research", async (c) => {
+  const subject = subjectOf(c.req.param("kind"), c.req.param("id"));
   const { instructions } = z.object({ instructions: z.string().max(2000).optional() }).parse(await c.req.json().catch(() => ({})));
-  const job = startResearch(db, id, instructions);
+  const job = startResearch(db, subject, instructions);
   return c.json({ runId: job.runId });
 });
 
-app.get("/api/contacts/:id/research/events", (c) => {
-  const job = getJob(idParam(c.req.param("id")));
+app.get("/api/:kind{contacts|orgs}/:id/research/events", (c) => {
+  const job = getJob(subjectOf(c.req.param("kind"), c.req.param("id")));
   if (!job) return c.json({ error: "No research running" }, 404);
   return streamSSE(c, async (stream) => {
     // Writes are chained so the final event is flushed before the stream closes.
@@ -272,10 +279,10 @@ app.get("/api/contacts/:id/research/events", (c) => {
   });
 });
 
-const FieldList = z.object({ fields: z.array(z.enum(RESEARCHABLE_FIELDS)) });
+const FieldList = z.object({ fields: z.array(z.enum([...RESEARCHABLE_FIELDS, ...ORG_RESEARCHABLE])) });
 app.post("/api/research/:runId/accept", async (c) => {
   const run = acceptSuggestions(db, idParam(c.req.param("runId")), FieldList.parse(await c.req.json()).fields);
-  return c.json({ run, contact: db.getContact(run.contact_id) });
+  return c.json({ run });
 });
 app.post("/api/research/:runId/dismiss", async (c) => {
   return c.json({ run: dismissSuggestions(db, idParam(c.req.param("runId")), FieldList.parse(await c.req.json()).fields) });

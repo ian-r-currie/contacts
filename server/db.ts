@@ -7,6 +7,7 @@ import { config } from "./config.ts";
 export const CONTACT_FIELDS = [
   "name",
   "role",
+  "relationship_status",
   "department",
   "research",
   "website",
@@ -23,7 +24,8 @@ export type ResearchableField = (typeof RESEARCHABLE_FIELDS)[number];
 
 /** in_network is false for people who only appear as someone's connection (not tracked as contacts). */
 export type Contact = { id: number; in_network: boolean; created_at: string; updated_at: string } & Record<ContactField, string>;
-export type Relation = { id: number; name: string; note: string; in_network: boolean };
+/** A link between two people. `kind` is an optional type (friends, mentorship, supervisor…), `note` free text. */
+export type Relation = { id: number; name: string; kind: string; note: string; in_network: boolean };
 /** A contact's link to an organization. `current` marks where they are now (e.g. their current school). */
 export type Membership = { id: number; name: string; type: string; current: boolean };
 export type ContactWithRelations = Contact & { related: Relation[]; orgs: Membership[] };
@@ -39,14 +41,16 @@ export type OrgRef = { name: string; type?: string; current?: boolean };
 
 export type ResearchRun = {
   id: number;
-  contact_id: number;
+  /** Exactly one of contact_id / org_id is set: what the run researched. */
+  contact_id: number | null;
+  org_id: number | null;
   status: "running" | "done" | "error";
   started_at: string;
   finished_at: string | null;
   summary: string;
   sources: { url: string; title: string }[];
-  applied: Partial<Record<ResearchableField, string>>;
-  suggestions: Partial<Record<ResearchableField, string>>;
+  applied: Record<string, string>;
+  suggestions: Record<string, string>;
   error: string;
 };
 
@@ -58,6 +62,27 @@ export const splitList = (value: string) =>
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+
+const RUNS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS research_runs (
+  id INTEGER PRIMARY KEY,
+  contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,
+  org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  finished_at TEXT,
+  summary TEXT NOT NULL DEFAULT '',
+  sources TEXT NOT NULL DEFAULT '[]',
+  applied TEXT NOT NULL DEFAULT '{}',
+  suggestions TEXT NOT NULL DEFAULT '{}',
+  error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS research_runs_contact ON research_runs(contact_id);
+CREATE INDEX IF NOT EXISTS research_runs_org ON research_runs(org_id);
+`;
+
+/** What a research run is about. */
+export type Subject = { kind: "contact" | "org"; id: number };
 
 const ORG_SCHEMA = `
 CREATE TABLE IF NOT EXISTS organizations (
@@ -90,6 +115,7 @@ CREATE TABLE IF NOT EXISTS contacts (
   name TEXT NOT NULL,
   in_network INTEGER NOT NULL DEFAULT 1,
   role TEXT NOT NULL DEFAULT '',
+  relationship_status TEXT NOT NULL DEFAULT '',
   department TEXT NOT NULL DEFAULT '',
   research TEXT NOT NULL DEFAULT '',
   website TEXT NOT NULL DEFAULT '',
@@ -106,6 +132,7 @@ CREATE TABLE IF NOT EXISTS contacts (
 CREATE TABLE IF NOT EXISTS relationships (
   a_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
   b_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   PRIMARY KEY (a_id, b_id),
@@ -115,19 +142,7 @@ CREATE INDEX IF NOT EXISTS relationships_b ON relationships(b_id);
 
 ${ORG_SCHEMA}
 
-CREATE TABLE IF NOT EXISTS research_runs (
-  id INTEGER PRIMARY KEY,
-  contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
-  status TEXT NOT NULL,
-  started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  finished_at TEXT,
-  summary TEXT NOT NULL DEFAULT '',
-  sources TEXT NOT NULL DEFAULT '[]',
-  applied TEXT NOT NULL DEFAULT '{}',
-  suggestions TEXT NOT NULL DEFAULT '{}',
-  error TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS research_runs_contact ON research_runs(contact_id);
+${RUNS_SCHEMA}
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint TEXT PRIMARY KEY,
@@ -162,13 +177,13 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
     const map = new Map<number, Relation[]>(ids.map((id) => [id, []]));
     const rows = db
       .prepare(
-        `SELECT r.a_id AS self, c.id, c.name, c.in_network, r.note FROM relationships r JOIN contacts c ON c.id = r.b_id
+        `SELECT r.a_id AS self, c.id, c.name, c.in_network, r.kind, r.note FROM relationships r JOIN contacts c ON c.id = r.b_id
          UNION ALL
-         SELECT r.b_id AS self, c.id, c.name, c.in_network, r.note FROM relationships r JOIN contacts c ON c.id = r.a_id
+         SELECT r.b_id AS self, c.id, c.name, c.in_network, r.kind, r.note FROM relationships r JOIN contacts c ON c.id = r.a_id
          ORDER BY name COLLATE NOCASE`,
       )
-      .all() as { self: number; id: number; name: string; in_network: number; note: string }[];
-    for (const r of rows) map.get(r.self)?.push({ id: r.id, name: r.name, note: r.note, in_network: Boolean(r.in_network) });
+      .all() as { self: number; id: number; name: string; in_network: number; kind: string; note: string }[];
+    for (const r of rows) map.get(r.self)?.push({ id: r.id, name: r.name, kind: r.kind, note: r.note, in_network: Boolean(r.in_network) });
     return map;
   }
 
@@ -257,14 +272,24 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
       return db.prepare("DELETE FROM contacts WHERE id = ?").run(id).changes > 0;
     },
 
-    /** Links two contacts. Idempotent; updates the note when given. */
-    relate(x: number, y: number, note?: string) {
+    /** Links two contacts. Idempotent; updates the kind and/or note when given. */
+    relate(x: number, y: number, details: { note?: string; kind?: string } = {}) {
       if (x === y) throw new Error("A contact cannot be related to itself");
       const [a, b] = x < y ? [x, y] : [y, x];
+      const { note, kind } = details;
       db.prepare(
-        `INSERT INTO relationships (a_id, b_id, note) VALUES (?, ?, ?)
-         ON CONFLICT (a_id, b_id) DO UPDATE SET note = CASE WHEN ? IS NULL THEN note ELSE excluded.note END`,
-      ).run(a, b, note ?? "", note ?? null);
+        `INSERT INTO relationships (a_id, b_id, note, kind) VALUES (?, ?, ?, ?)
+         ON CONFLICT (a_id, b_id) DO UPDATE SET
+           note = CASE WHEN ? IS NULL THEN note ELSE excluded.note END,
+           kind = CASE WHEN ? IS NULL THEN kind ELSE excluded.kind END`,
+      ).run(a, b, note?.trim() ?? "", kind?.trim() ?? "", note ?? null, kind ?? null);
+    },
+
+    /** Relationship types already in use, most common first (for suggestions). */
+    relationKinds(): string[] {
+      return (
+        db.prepare("SELECT kind FROM relationships WHERE kind != '' GROUP BY kind COLLATE NOCASE ORDER BY COUNT(*) DESC").all() as { kind: string }[]
+      ).map((r) => r.kind);
     },
 
     unrelate(x: number, y: number): boolean {
@@ -387,8 +412,9 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
     },
 
     // --- research runs ---
-    startRun(contactId: number): number {
-      return Number(db.prepare("INSERT INTO research_runs (contact_id, status) VALUES (?, 'running')").run(contactId).lastInsertRowid);
+    startRun(subject: Subject): number {
+      const col = subject.kind === "org" ? "org_id" : "contact_id";
+      return Number(db.prepare(`INSERT INTO research_runs (${col}, status) VALUES (?, 'running')`).run(subject.id).lastInsertRowid);
     },
 
     finishRun(id: number, data: Pick<ResearchRun, "summary" | "sources" | "applied" | "suggestions">) {
@@ -414,10 +440,9 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
       return row && parseRun(row);
     },
 
-    listRuns(contactId: number): ResearchRun[] {
-      return (db.prepare("SELECT * FROM research_runs WHERE contact_id = ? ORDER BY id DESC").all(contactId) as Record<string, unknown>[]).map(
-        parseRun,
-      );
+    listRuns(subject: Subject): ResearchRun[] {
+      const col = subject.kind === "org" ? "org_id" : "contact_id";
+      return (db.prepare(`SELECT * FROM research_runs WHERE ${col} = ? ORDER BY id DESC`).all(subject.id) as Record<string, unknown>[]).map(parseRun);
     },
 
     // --- push + settings ---
@@ -448,8 +473,9 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
  * Upgrades databases created by earlier versions:
  * v1: "category" folds into "role" (Professor etc.), adds current_school and in_network.
  * v2: schools become organizations (type "School") linked through contact_orgs.
+ * v3: relationship status on people, a type on relationships, research runs for organizations.
  */
-const LATEST_VERSION = 2;
+const LATEST_VERSION = 3;
 function migrate(db: DatabaseSync) {
   const version = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
   const hasContacts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'contacts'").get();
@@ -495,6 +521,26 @@ function migrate(db: DatabaseSync) {
       ALTER TABLE contacts DROP COLUMN current_school;
       PRAGMA user_version = 2;
     `);
+    db.exec("COMMIT");
+  }
+  if (version < 3) {
+    db.exec("BEGIN");
+    db.exec(`
+      ALTER TABLE contacts ADD COLUMN relationship_status TEXT NOT NULL DEFAULT '';
+      ALTER TABLE relationships ADD COLUMN kind TEXT NOT NULL DEFAULT '';
+    `);
+    // Research runs can now belong to an organization, so contact_id becomes optional (SQLite needs a table rebuild).
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'research_runs'").get()) {
+      db.exec(`
+        ALTER TABLE research_runs RENAME TO research_runs_v2;
+        DROP INDEX IF EXISTS research_runs_contact;
+        ${RUNS_SCHEMA}
+        INSERT INTO research_runs (id, contact_id, status, started_at, finished_at, summary, sources, applied, suggestions, error)
+          SELECT id, contact_id, status, started_at, finished_at, summary, sources, applied, suggestions, error FROM research_runs_v2;
+        DROP TABLE research_runs_v2;
+      `);
+    }
+    db.exec("PRAGMA user_version = 3");
     db.exec("COMMIT");
   }
 }

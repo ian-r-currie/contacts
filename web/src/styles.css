@@ -1113,9 +1113,11 @@ button.tag.person.outside {
 }
 .network-legend {
   position: absolute;
-  left: 12px;
-  bottom: 10px;
-  right: 12px;
+  left: 0;
+  bottom: 0;
+  right: 0;
+  padding: 8px 12px 10px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
   display: flex;
   flex-wrap: wrap;
   gap: 4px 16px;
@@ -1315,4 +1317,80 @@ button.tag.person.outside {
 }
 .contacts.orgs .col-people {
   min-width: 300px;
+}
+
+/* --- relationship types & status --- */
+.kind-pill {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.kind-pill.placeholder {
+  border-style: dashed;
+  background: none;
+  color: var(--muted);
+  opacity: 0;
+}
+.related-list li:hover .kind-pill.placeholder,
+.kind-pill.placeholder:focus-visible {
+  opacity: 0.8;
+}
+@media (hover: none) {
+  .kind-pill.placeholder,
+  .related-list .note.placeholder {
+    opacity: 0.6;
+  }
+}
+.kind-input {
+  width: 130px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.tag.status {
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
+/* --- network: colour by, relationship labels --- */
+.color-by {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.color-by select {
+  width: auto;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+.swatches {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.swatch i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.swatch i.unset {
+  background: var(--node-in);
+}
+.link-label {
+  text-anchor: middle;
+  dominant-baseline: central;
+  fill: var(--accent);
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-linejoin: round;
+  pointer-events: none;
 }

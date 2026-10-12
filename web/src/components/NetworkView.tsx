@@ -5,7 +5,7 @@ import { orgSummary, type Contact, type Org } from "../api";
 type PersonNode = SimulationNodeDatum & { kind: "person"; id: string; contact: Contact; degree: number; r: number };
 type OrgNode = SimulationNodeDatum & { kind: "org"; id: string; org: Org };
 type Node = PersonNode | OrgNode;
-type Link = SimulationLinkDatum<Node> & { kind: "rel" | "member" | "parent"; note: string; share: number };
+type Link = SimulationLinkDatum<Node> & { kind: "rel" | "member" | "parent"; relKind: string; note: string; share: number };
 type View = { x: number; y: number; k: number };
 type Selection = { type: "person" | "org"; id: number } | null;
 type Pt = [number, number];
@@ -14,10 +14,18 @@ type Props = {
   contacts: Contact[];
   orgs: Org[];
   query: string;
-  focusId?: number;
-  onOpen: (id: number) => void;
-  onOpenOrg: (id: number) => void;
+  /** The person or organization open in the side panel; the network highlights it. */
+  selectedPersonId?: number;
+  selectedOrgId?: number;
+  /** Clicking a person or bubble opens it in the side panel; null closes the panel. */
+  onSelectPerson: (id: number | null) => void;
+  onSelectOrg: (id: number | null) => void;
 };
+
+type ColorBy = "none" | "role" | "relationship_status";
+const COLOR_BY_LABELS: Record<ColorBy, string> = { none: "Nothing", role: "Role", relationship_status: "Relationship status" };
+/** Most frequent values get the first hues; past seven, "Other" shares a gray. */
+const NODE_COLORS = 7;
 
 /** Fixed-order categorical hues (validated palette); organizations past the eighth fall back to neutral gray. */
 const ORG_COLORS = 8;
@@ -93,21 +101,35 @@ const circlePoints = (x: number, y: number, r: number, n = 20): Pt[] =>
   Array.from({ length: n }, (_, i) => [x + r * Math.cos((2 * Math.PI * i) / n), y + r * Math.sin((2 * Math.PI * i) / n)] as Pt);
 
 /** Force-directed web of people, their connections, and organization bubbles they sit inside (Venn-style). */
-export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg }: Props) {
+export function NetworkView({ contacts, orgs, query, selectedPersonId, selectedOrgId, onSelectPerson, onSelectOrg }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const legendRef = useRef<HTMLDivElement>(null);
   const simRef = useRef<Simulation<Node, Link> | null>(null);
   const positions = useRef(new Map<string, { x: number; y: number }>());
   const [, setFrame] = useState(0);
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
-  const [selected, setSelected] = useState<Selection>(focusId ? { type: "person", id: focusId } : null);
+  const selected: Selection =
+    selectedPersonId != null ? { type: "person", id: selectedPersonId } : selectedOrgId != null ? { type: "org", id: selectedOrgId } : null;
+  const [colorBy, setColorBy] = useState<ColorBy>(() => {
+    try {
+      const v = localStorage.getItem("networkColorBy");
+      return v === "role" || v === "relationship_status" ? v : "none";
+    } catch {
+      return "none";
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("networkColorBy", colorBy);
+    } catch {
+      /* storage unavailable */
+    }
+  }, [colorBy]);
   const [hover, setHover] = useState<{ node: PersonNode; x: number; y: number } | null>(null);
   const [showIsolated, setShowIsolated] = useState(false);
   const [showOrgs, setShowOrgs] = useState(true);
   const fitted = useRef(false);
 
-  useEffect(() => {
-    if (focusId) setSelected({ type: "person", id: focusId });
-  }, [focusId]);
 
   const structure = useMemo(() => orgStructure(orgs), [orgs]);
   const colorIndex = useMemo(() => new Map([...orgs].sort((a, b) => a.id - b.id).map((o, i) => [o.id, i < ORG_COLORS ? i + 1 : 0])), [orgs]);
@@ -127,11 +149,11 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
     const orgNodes: OrgNode[] = showOrgs ? orgs.map((o) => ({ kind: "org", id: `o${o.id}`, org: o, ...placed(`o${o.id}`) })) : [];
     const links: Link[] = [];
     for (const c of visible) {
-      for (const r of c.related) if (c.id < r.id && ids.has(r.id)) links.push({ kind: "rel", source: `p${c.id}`, target: `p${r.id}`, note: r.note, share: 1 });
-      if (showOrgs) for (const m of c.orgs) links.push({ kind: "member", source: `p${c.id}`, target: `o${m.id}`, note: "", share: c.orgs.length });
+      for (const r of c.related) if (c.id < r.id && ids.has(r.id)) links.push({ kind: "rel", source: `p${c.id}`, target: `p${r.id}`, relKind: r.kind, note: r.note, share: 1 });
+      if (showOrgs) for (const m of c.orgs) links.push({ kind: "member", source: `p${c.id}`, target: `o${m.id}`, relKind: "", note: "", share: c.orgs.length });
     }
     if (showOrgs)
-      for (const o of orgs) if (o.parent_id != null && structure.byId.has(o.parent_id)) links.push({ kind: "parent", source: `o${o.id}`, target: `o${o.parent_id}`, note: "", share: 1 });
+      for (const o of orgs) if (o.parent_id != null && structure.byId.has(o.parent_id)) links.push({ kind: "parent", source: `o${o.id}`, target: `o${o.parent_id}`, relKind: "", note: "", share: 1 });
     return { nodes: [...people, ...orgNodes] as Node[], links, orgNodes, people };
   }, [contacts, orgs, showIsolated, showOrgs, structure]);
 
@@ -289,7 +311,9 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
   const fit = () => {
     const svg = svgRef.current;
     if (!svg || nodes.length === 0) return;
-    const { width, height } = svg.getBoundingClientRect();
+    const { width, height: fullHeight } = svg.getBoundingClientRect();
+    // Keep everything above the legend overlay.
+    const height = fullHeight - (legendRef.current?.getBoundingClientRect().height ?? 0) - 12;
     const xs = [...people.map((n) => n.x ?? 0), ...bubbles.flatMap((b) => b.bounds.slice(0, 2))];
     const ys = [...people.map((n) => n.y ?? 0), ...bubbles.flatMap((b) => b.bounds.slice(2))];
     const [minX, maxX, minY, maxY] = [Math.min(...xs) - 50, Math.max(...xs) + 50, Math.min(...ys) - 30, Math.max(...ys) + 40];
@@ -403,8 +427,13 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
     if (g.moved) return;
     const id = g.node?.contact.id ?? g.orgId;
     const type = g.node ? "person" : "org";
-    if (id == null) setSelected(null);
-    else setSelected(selected?.type === type && selected.id === id ? null : { type, id });
+    // Clicking the open item again (or the background) closes the panel.
+    const same = selected?.type === type && selected.id === id;
+    if (id == null || same) {
+      onSelectPerson(null);
+      onSelectOrg(null);
+    } else if (type === "person") onSelectPerson(id);
+    else onSelectOrg(id);
   };
 
   useEffect(() => {
@@ -421,6 +450,26 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
   // Labels stay roughly the same size on screen instead of growing with the zoom.
   const labelScale = Math.min(view.k, 1.1) / view.k;
   const hiddenCount = contacts.length - people.length;
+
+  // Categories for "colour by": value → colour slot (1–7, 0 for Other), most common first.
+  const categories = useMemo(() => {
+    if (colorBy === "none") return null;
+    const counts = new Map<string, number>();
+    for (const p of people) {
+      const v = p.contact[colorBy].trim();
+      if (v) counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const slot = new Map(ranked.map(([v], i) => [v, i < NODE_COLORS ? i + 1 : 0]));
+    const other = ranked.slice(NODE_COLORS).reduce((n, [, c]) => n + c, 0);
+    const unset = people.filter((p) => !p.contact[colorBy].trim()).length;
+    return { slot, legend: ranked.slice(0, NODE_COLORS), other, unset };
+  }, [colorBy, people]);
+  const nodeColor = (c: Contact) => {
+    if (!categories) return undefined;
+    const v = c[colorBy as Exclude<ColorBy, "none">].trim();
+    return v ? `var(--org-${categories.slot.get(v) ?? 0})` : undefined;
+  };
 
   const personState = (p: PersonNode) => {
     if (!focus) return "";
@@ -447,7 +496,7 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
               <path
                 key={b.org.id}
                 d={b.d}
-                className={`bubble c${colorIndex.get(b.org.id) ?? 0} ${orgState(b.org)}`}
+                className={`bubble c${categories ? 0 : (colorIndex.get(b.org.id) ?? 0)} ${orgState(b.org)}`}
                 strokeWidth={1.5 / Math.max(view.k, 0.6)}
                 onPointerDown={(e) => onPointerDown(e, { orgId: b.org.id })}
               />
@@ -470,6 +519,29 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
                   className={active ? "link active" : focus ? "link dim" : "link"}
                   strokeWidth={(active ? 2.5 : 1.5) / Math.max(view.k, 0.6)}
                 />
+              );
+            })}
+          </g>
+          <g className="link-labels">
+            {/* Relationship details only for the selected person's lines. */}
+            {links.map((l, i) => {
+              if (l.kind !== "rel" || selected?.type !== "person") return null;
+              const s = l.source as PersonNode;
+              const t = l.target as PersonNode;
+              if (s.x == null || t.x == null || (s.contact.id !== selected.id && t.contact.id !== selected.id)) return null;
+              const text = l.relKind || l.note;
+              if (!text) return null;
+              return (
+                <text
+                  key={i}
+                  x={(s.x + t.x!) / 2}
+                  y={(s.y! + t.y!) / 2}
+                  className="link-label"
+                  style={{ fontSize: 11 * labelScale, strokeWidth: 3 * labelScale }}
+                >
+                  {l.note && l.relKind ? <title>{l.note}</title> : null}
+                  {shorten(text, 30)}
+                </text>
               );
             })}
           </g>
@@ -501,7 +573,7 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
                 >
                   {/* Larger invisible hit target than the visible mark. */}
                   <circle r={n.r + 8} className="hit" />
-                  <circle r={n.r} className="dot" />
+                  <circle r={n.r} className="dot" style={nodeColor(n.contact) ? { fill: nodeColor(n.contact) } : undefined} />
                   <text y={n.r + 12 * labelScale} className="label" style={{ fontSize: 11 * labelScale, strokeWidth: 3 * labelScale }}>
                     {n.contact.name}
                   </text>
@@ -524,7 +596,7 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
         </button>
       </div>
 
-      <div className="network-legend">
+      <div className="network-legend" ref={legendRef}>
         <span>
           <svg width="14" height="14" aria-hidden>
             <circle cx="7" cy="7" r="5.5" className="legend-in" />
@@ -543,6 +615,38 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
             Organizations
           </label>
         )}
+        <label className="color-by">
+          Colour by
+          <select value={colorBy} onChange={(e) => setColorBy(e.target.value as ColorBy)}>
+            {(Object.keys(COLOR_BY_LABELS) as ColorBy[]).map((k) => (
+              <option key={k} value={k}>
+                {COLOR_BY_LABELS[k]}
+              </option>
+            ))}
+          </select>
+        </label>
+        {categories && (
+          <span className="swatches">
+            {categories.legend.map(([value, count]) => (
+              <span key={value} className="swatch">
+                <i style={{ background: `var(--org-${categories.slot.get(value)})` }} />
+                {value} <span className="muted">{count}</span>
+              </span>
+            ))}
+            {categories.other > 0 && (
+              <span className="swatch">
+                <i style={{ background: "var(--org-0)" }} />
+                Other <span className="muted">{categories.other}</span>
+              </span>
+            )}
+            {categories.unset > 0 && (
+              <span className="swatch">
+                <i className="unset" />
+                Not set <span className="muted">{categories.unset}</span>
+              </span>
+            )}
+          </span>
+        )}
         {(hiddenCount > 0 || showIsolated) && (
           <label className="menu-check">
             <input type="checkbox" checked={showIsolated} onChange={(e) => setShowIsolated(e.target.checked)} />
@@ -551,73 +655,6 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
         )}
         {!selected && <span className="muted">Click a person or an organization to highlight. Drag to move, scroll to zoom.</span>}
       </div>
-
-      {selectedContact && (
-        <div className="network-card">
-          <div className="card-top">
-            <strong>{selectedContact.name}</strong>
-            <button className="icon-btn" aria-label="Clear selection" onClick={() => setSelected(null)}>
-              ✕
-            </button>
-          </div>
-          <div className="muted small">
-            {[selectedContact.role, orgSummary(selectedContact)].filter(Boolean).join(" · ") || "No details yet"}
-            {!selectedContact.in_network && <span className="outside-badge">outside network</span>}
-          </div>
-          {selectedContact.related.length > 0 ? (
-            <div className="chips network-connections">
-              {selectedContact.related.map((r) => (
-                <button
-                  key={r.id}
-                  className={`tag person ${r.in_network ? "" : "outside"}`}
-                  title={r.note || undefined}
-                  onClick={() => setSelected({ type: "person", id: r.id })}
-                >
-                  {r.name}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="muted small">No connections yet.</p>
-          )}
-          <button className="small-btn" onClick={() => onOpen(selectedContact.id)}>
-            Open details
-          </button>
-        </div>
-      )}
-
-      {selectedOrg && (
-        <div className="network-card">
-          <div className="card-top">
-            <strong>{selectedOrg.name}</strong>
-            <button className="icon-btn" aria-label="Clear selection" onClick={() => setSelected(null)}>
-              ✕
-            </button>
-          </div>
-          <div className="muted small">
-            {[selectedOrg.type, selectedOrg.parent_id ? `part of ${structure.byId.get(selectedOrg.parent_id)?.name ?? ""}` : ""].filter(Boolean).join(" · ") ||
-              "Organization"}
-          </div>
-          {(() => {
-            const ids = [...(structure.members.get(selectedOrg.id) ?? [])];
-            const list = contacts.filter((c) => ids.includes(c.id));
-            return list.length ? (
-              <div className="chips network-connections">
-                {list.map((c) => (
-                  <button key={c.id} className={`tag person ${c.in_network ? "" : "outside"}`} onClick={() => setSelected({ type: "person", id: c.id })}>
-                    {c.name}
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p className="muted small">Nobody here yet.</p>
-            );
-          })()}
-          <button className="small-btn" onClick={() => onOpenOrg(selectedOrg.id)}>
-            Open organization
-          </button>
-        </div>
-      )}
 
       {hover && (
         <div className="network-tooltip" style={{ left: hover.x + 12, top: hover.y + 12 }}>

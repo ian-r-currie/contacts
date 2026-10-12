@@ -3,9 +3,14 @@ import { api, formatDate, type Contact, type Org, type OrgField, type OrgInput }
 import { websiteLabel } from "./ContactTable";
 import { EditableCell } from "./EditableCell";
 import { resolveParent } from "./OrgTable";
+import type { PanelTab } from "./DetailPanel";
+import { ResearchPanel } from "./ResearchPanel";
 
 type Props = {
   org: Org;
+  tab: PanelTab;
+  onTab: (tab: PanelTab) => void;
+  researchEnabled: boolean;
   orgs: Org[];
   contacts: Contact[];
   onClose: () => void;
@@ -24,7 +29,7 @@ const LABELS: Record<OrgField | "parent", string> = {
   notes: "Notes",
 };
 
-export function OrgPanel({ org: o, orgs, contacts, onClose, onOpenOrg, onOpenContact, onChanged, notify }: Props) {
+export function OrgPanel({ org: o, tab, onTab, researchEnabled, orgs, contacts, onClose, onOpenOrg, onOpenContact, onChanged, notify }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !(e.target as HTMLElement).closest("input, textarea")) onClose();
@@ -64,7 +69,33 @@ export function OrgPanel({ org: o, orgs, contacts, onClose, onOpenOrg, onOpenCon
         </button>
       </div>
 
+      <div className="tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "details"} className={tab === "details" ? "active" : ""} onClick={() => onTab("details")}>
+          Details
+        </button>
+        <button role="tab" aria-selected={tab === "research"} className={tab === "research" ? "active" : ""} onClick={() => onTab("research")}>
+          ✦ Research
+        </button>
+      </div>
+
       <div className="panel-body">
+        {tab === "research" ? (
+          <ResearchPanel
+            target={{
+              kind: "org",
+              id: o.id,
+              name: o.name,
+              values: { ...o, parent: parent?.name ?? "" } as unknown as Record<string, string>,
+              labels: LABELS,
+              fieldsBlurb: "name, type, website, description, and the organization it's part of",
+            }}
+            enabled={researchEnabled}
+            onChanged={onChanged}
+            onAddToNotes={(summary) => update({ notes: [o.notes, summary].filter(Boolean).join("\n\n") })}
+            notify={notify}
+          />
+        ) : (
+          <>
         {field("type", { list: "org-type-options" })}
         <div className="field">
           <label>{LABELS.parent}</label>
@@ -147,6 +178,8 @@ export function OrgPanel({ org: o, orgs, contacts, onClose, onOpenOrg, onOpenCon
             Delete
           </button>
         </footer>
+          </>
+        )}
       </div>
     </aside>
   );

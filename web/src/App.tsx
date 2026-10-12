@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, dueState, localToday, orgSummary, ORG_TYPES, type AppConfig, type Contact, type ContactInput, type Org } from "./api";
+import { api, ApiError, dueState, localToday, orgSummary, ORG_TYPES, RELATION_KINDS, type AppConfig, type Contact, type ContactInput, type Org } from "./api";
 import { ContactTable, type Column, type SortKey, ALL_COLUMNS, DEFAULT_COLUMNS } from "./components/ContactTable";
 import { DetailPanel, type PanelTab } from "./components/DetailPanel";
 import { ImportDialog } from "./components/ImportDialog";
@@ -75,17 +75,20 @@ function Main({ authRequired }: { authRequired: boolean }) {
   const [showOutside, setShowOutside] = useState(false);
   const [dueOnly, setDueOnly] = useState(false);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>(() => load("sort", { key: "name" as SortKey, dir: 1 as const }));
-  const [columns, setColumns] = useState<Column[]>(() =>
+  const [columns, setColumns] = useState<Column[]>(() => {
     // "schools" became "orgs" when schools turned into organizations.
-    load<string[]>("columns", DEFAULT_COLUMNS)
-      .map((c) => (c === "schools" ? "orgs" : c))
-      .filter((c): c is Column => ALL_COLUMNS.includes(c as Column)),
-  );
+    const saved = load<string[]>("columns", DEFAULT_COLUMNS).map((c) => (c === "schools" ? "orgs" : c));
+    // Columns added since the preferences were saved show up by default.
+    const seen = load<string[] | null>("columnsSeen", null) ?? ALL_COLUMNS.filter((c) => c !== "relationship_status");
+    const added = DEFAULT_COLUMNS.filter((c) => !seen.includes(c));
+    return ALL_COLUMNS.filter((c) => saved.includes(c) || added.includes(c));
+  });
   const [selected, setSelected] = useState<{ id: number; tab: PanelTab } | null>(() => {
     const id = Number(new URLSearchParams(location.search).get("contact"));
     return id ? { id, tab: "details" } : null;
   });
   const [selectedOrgId, setSelectedOrgId] = useState<number | null>(() => Number(new URLSearchParams(location.search).get("org")) || null);
+  const [orgTab, setOrgTab] = useState<PanelTab>("details");
   const [importing, setImporting] = useState(false);
   const [push, setPush] = useState<PushState>("unsupported");
   const [newName, setNewName] = useState("");
@@ -121,7 +124,10 @@ function Main({ authRequired }: { authRequired: boolean }) {
 
   useEffect(() => save("view", view), [view]);
   useEffect(() => save("sort", sort), [sort]);
-  useEffect(() => save("columns", columns), [columns]);
+  useEffect(() => {
+    save("columns", columns);
+    save("columnsSeen", ALL_COLUMNS);
+  }, [columns]);
 
   // Reflect the open contact or organization in the URL so notifications and reloads land on it.
   useEffect(() => {
@@ -138,12 +144,19 @@ function Main({ authRequired }: { authRequired: boolean }) {
     setSelectedOrgId(null);
     setSelected({ id, tab });
   }, []);
-  const openOrg = useCallback((id: number) => {
+  const openOrg = useCallback((id: number, tab: PanelTab = "details") => {
     setSelected(null);
     setSelectedOrgId(id);
+    setOrgTab(tab);
   }, []);
 
   const roles = useMemo(() => [...new Set((contacts ?? []).map((c) => c.role).filter(Boolean))].sort(), [contacts]);
+  const relationKinds = useMemo(() => {
+    const used = (contacts ?? []).flatMap((c) => c.related.map((r) => r.kind)).filter(Boolean);
+    const seen = new Set<string>();
+    return [...used, ...RELATION_KINDS].filter((k) => !seen.has(k.toLowerCase()) && seen.add(k.toLowerCase()));
+  }, [contacts]);
+  const statuses = useMemo(() => [...new Set((contacts ?? []).map((c) => c.relationship_status).filter(Boolean))].sort(), [contacts]);
   const outsideCount = useMemo(() => (contacts ?? []).filter((c) => !c.in_network).length, [contacts]);
   const networkCount = (contacts?.length ?? 0) - outsideCount;
   const today = localToday();
@@ -303,6 +316,16 @@ function Main({ authRequired }: { authRequired: boolean }) {
           <option key={t} value={t} />
         ))}
       </datalist>
+      <datalist id="relation-kind-options">
+        {relationKinds.map((k) => (
+          <option key={k} value={k} />
+        ))}
+      </datalist>
+      <datalist id="status-options">
+        {statuses.map((r) => (
+          <option key={r} value={r} />
+        ))}
+      </datalist>
       <datalist id="role-options">
         {[...new Set(["Professor", ...roles])].map((r) => (
           <option key={r} value={r} />
@@ -320,7 +343,15 @@ function Main({ authRequired }: { authRequired: boolean }) {
             </p>
           </div>
         ) : view === "network" ? (
-          <NetworkView contacts={contacts} orgs={orgs} query={query} focusId={selected?.id} onOpen={openContact} onOpenOrg={openOrg} />
+          <NetworkView
+            contacts={contacts}
+            orgs={orgs}
+            query={query}
+            selectedPersonId={selected?.id}
+            selectedOrgId={selectedOrgId ?? undefined}
+            onSelectPerson={(id) => (id == null ? setSelected(null) : openContact(id, selected?.tab ?? "details"))}
+            onSelectOrg={(id) => (id == null ? setSelectedOrgId(null) : openOrg(id, selectedOrgId ? orgTab : "details"))}
+          />
         ) : view === "orgs" ? (
           <OrgTable orgs={orgs} query={query} selectedId={selectedOrgId ?? undefined} onOpen={openOrg} onOpenContact={openContact} onChanged={refresh} notify={notify} />
         ) : (
@@ -362,11 +393,14 @@ function Main({ authRequired }: { authRequired: boolean }) {
           org={selectedOrg}
           orgs={orgs}
           contacts={contacts ?? []}
+          tab={orgTab}
+          onTab={setOrgTab}
           onClose={() => setSelectedOrgId(null)}
           onOpenOrg={openOrg}
           onOpenContact={(id) => openContact(id)}
           onChanged={refresh}
           notify={notify}
+          researchEnabled={!!config?.researchEnabled}
         />
       )}
 
@@ -390,6 +424,7 @@ type View = "people" | "orgs" | "network";
 const LABEL_FOR: Record<Column, string> = {
   name: "Name",
   role: "Role",
+  relationship_status: "Relationship status",
   department: "Department",
   orgs: "Organizations",
   research: "Research",

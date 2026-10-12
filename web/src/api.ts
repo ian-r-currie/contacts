@@ -1,6 +1,7 @@
 export const FIELDS = [
   "name",
   "role",
+  "relationship_status",
   "department",
   "research",
   "website",
@@ -15,6 +16,7 @@ export type ResearchableField = "name" | "role" | "department" | "organizations"
 export const LABELS: Record<Field | "orgs" | "organizations" | "related" | "updated_at", string> = {
   name: "Name",
   role: "Role",
+  relationship_status: "Relationship status",
   department: "Department",
   orgs: "Organizations",
   organizations: "Organizations",
@@ -28,7 +30,10 @@ export const LABELS: Record<Field | "orgs" | "organizations" | "related" | "upda
   updated_at: "Updated",
 };
 
-export type Relation = { id: number; name: string; note: string; in_network: boolean };
+/** A link between two people. `kind` is an optional type (friends, mentorship…), `note` free text. */
+export type Relation = { id: number; name: string; kind: string; note: string; in_network: boolean };
+/** Suggested relationship types; any text works. */
+export const RELATION_KINDS = ["Friends", "Colleagues", "Mentorship", "Supervisor", "Collaborators", "Classmates", "Family", "Introduced by"];
 /** A person's link to an organization. `current` marks where they are now. */
 export type Membership = { id: number; name: string; type: string; current: boolean };
 /** in_network is false for people who are only someone's connection, not tracked as contacts themselves. */
@@ -53,16 +58,19 @@ export const ORG_TYPES = ["School", "Lab", "Institute", "Department", "Company",
 
 export type ResearchRun = {
   id: number;
-  contact_id: number;
+  contact_id: number | null;
+  org_id: number | null;
   status: "running" | "done" | "error";
   started_at: string;
   finished_at: string | null;
   summary: string;
   sources: { url: string; title: string }[];
-  applied: Partial<Record<ResearchableField, string>>;
-  suggestions: Partial<Record<ResearchableField, string>>;
+  applied: Record<string, string>;
+  suggestions: Record<string, string>;
   error: string;
 };
+
+export type ResearchSubject = { kind: "contact" | "org"; id: number };
 
 export type ResearchEvent =
   | { type: "status"; text: string }
@@ -114,7 +122,9 @@ export const api = {
   create: (fields: ContactInput & { name: string }) => request<Contact>("POST", "/api/contacts", fields),
   update: (id: number, fields: ContactInput) => request<Contact>("PATCH", `/api/contacts/${id}`, fields),
   remove: (id: number) => request("DELETE", `/api/contacts/${id}`),
-  relate: (id: number, otherId: number, note?: string) => request<Contact>("PUT", `/api/contacts/${id}/related/${otherId}`, { note }),
+  relate: (id: number, otherId: number, details: { note?: string; kind?: string } = {}) =>
+    request<Contact>("PUT", `/api/contacts/${id}/related/${otherId}`, details),
+  relationKinds: () => request<string[]>("GET", "/api/relation-kinds"),
   unrelate: (id: number, otherId: number) => request<Contact>("DELETE", `/api/contacts/${id}/related/${otherId}`),
 
   importPreview: (csv: string, kind?: ImportKind) => request<ImportPreview>("POST", "/api/import/preview", { csv, kind }),
@@ -129,11 +139,11 @@ export const api = {
   updateOrg: (id: number, fields: OrgInput) => request<Org>("PATCH", `/api/orgs/${id}`, fields),
   removeOrg: (id: number) => request("DELETE", `/api/orgs/${id}`),
 
-  researchRuns: (id: number) => request<{ runs: ResearchRun[]; running: number | null }>("GET", `/api/contacts/${id}/research`),
-  startResearch: (id: number, instructions: string) => request<{ runId: number }>("POST", `/api/contacts/${id}/research`, { instructions }),
-  acceptSuggestions: (runId: number, fields: ResearchableField[]) =>
-    request<{ run: ResearchRun; contact: Contact }>("POST", `/api/research/${runId}/accept`, { fields }),
-  dismissSuggestions: (runId: number, fields: ResearchableField[]) =>
+  researchBase: (s: ResearchSubject) => `/api/${s.kind === "org" ? "orgs" : "contacts"}/${s.id}/research`,
+  researchRuns: (s: ResearchSubject) => request<{ runs: ResearchRun[]; running: number | null }>("GET", api.researchBase(s)),
+  startResearch: (s: ResearchSubject, instructions: string) => request<{ runId: number }>("POST", api.researchBase(s), { instructions }),
+  acceptSuggestions: (runId: number, fields: string[]) => request<{ run: ResearchRun }>("POST", `/api/research/${runId}/accept`, { fields }),
+  dismissSuggestions: (runId: number, fields: string[]) =>
     request<{ run: ResearchRun }>("POST", `/api/research/${runId}/dismiss`, { fields }),
 
   pushSubscribe: (sub: PushSubscriptionJSON) => request("POST", "/api/push/subscribe", sub),

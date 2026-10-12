@@ -8,10 +8,10 @@ import { parseCsv } from "./csv.ts";
 import { openDb } from "./db.ts";
 import { importCsv, importOrgsCsv, normalizeDate, previewCsv, splitNames } from "./importer.ts";
 
-const PEOPLE = `Name,Department,Related to,Role,Updated,Schools,Website,Follow-up Date,Notes
+const PEOPLE = `Name,Department,Related to,Role,Updated,Schools,Website,Follow-up Date,Notes,Relationship Status
 Ada Lovelace,Math,"Charles Babbage, Mary",PhD Candidate,Oct 7 2026,"Cambridge, UCL",https://ada.example.com,"October 17, 2026","Met at a talk
-Very friendly"
-Grace Hopper,CS,Ada Lovelace,Student,Oct 11 2026,Yale,,,
+Very friendly",Coffee chat done
+Grace Hopper,CS,Ada Lovelace,Student,Oct 11 2026,Yale,,,,
 `;
 
 const PROFS = `School,Professor,Department,Website,Interest (/5),Research,Email,Notes,Emailed On
@@ -53,6 +53,7 @@ test("import builds relationships, merges duplicates and matches nameless rows b
     ],
   );
   assert.equal(ada.notes, "Met at a talk\nVery friendly");
+  assert.equal(ada.relationship_status, "Coffee chat done");
   assert.equal(ada.updated_at.slice(0, 10), "2026-10-07");
   assert.deepEqual(ada.related.map((r) => r.name).sort(), ["Charles Babbage", "Grace Hopper", "Mary"]);
 
@@ -87,13 +88,26 @@ test("a nameless row imported first is renamed when someone references it later"
   assert.ok(!names.some((n) => n.startsWith("Unknown")));
 });
 
+test("relationship type and note update independently", () => {
+  const db = openDb(":memory:");
+  const a = db.createContact({ name: "A" });
+  const b = db.createContact({ name: "B" });
+  db.relate(a, b);
+  db.relate(a, b, { kind: "mentorship" });
+  db.relate(b, a, { note: "met at a talk" });
+  assert.deepEqual(db.getContact(a)!.related.map((r) => [r.kind, r.note]), [["mentorship", "met at a talk"]]);
+  db.relate(a, b, { kind: "" });
+  assert.equal(db.getContact(a)!.related[0].kind, "");
+  assert.equal(db.getContact(a)!.related[0].note, "met at a talk");
+});
+
 test("relationships are undirected and removed with the contact", () => {
   const db = openDb(":memory:");
   const a = db.createContact({ name: "A" });
   const b = db.createContact({ name: "B" });
-  db.relate(b, a, "colleagues");
-  assert.deepEqual(db.getContact(a)!.related, [{ id: b, name: "B", note: "colleagues", in_network: true }]);
-  assert.deepEqual(db.getContact(b)!.related, [{ id: a, name: "A", note: "colleagues", in_network: true }]);
+  db.relate(b, a, { note: "colleagues", kind: "friends" });
+  assert.deepEqual(db.getContact(a)!.related, [{ id: b, name: "B", kind: "friends", note: "colleagues", in_network: true }]);
+  assert.deepEqual(db.getContact(b)!.related, [{ id: a, name: "A", kind: "friends", note: "colleagues", in_network: true }]);
   db.deleteContact(b);
   assert.deepEqual(db.getContact(a)!.related, []);
 });
@@ -163,8 +177,15 @@ test("databases from earlier versions are migrated", () => {
     INSERT INTO contacts (id, name, category, role, schools) VALUES (1, 'Prof', 'Professor', '', 'UBC, McGill'), (2, 'Student', 'Contact', 'PhD', 'ubc'), (3, 'Friend', '', '', ''), (4, 'Loner', '', '', '');
     INSERT INTO relationships (a_id, b_id) VALUES (2, 3);
   `);
+  old.exec(`
+    CREATE TABLE research_runs (id INTEGER PRIMARY KEY, contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE, status TEXT NOT NULL,
+      started_at TEXT NOT NULL DEFAULT '', finished_at TEXT, summary TEXT NOT NULL DEFAULT '', sources TEXT NOT NULL DEFAULT '[]',
+      applied TEXT NOT NULL DEFAULT '{}', suggestions TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '');
+    INSERT INTO research_runs (id, contact_id, status, summary) VALUES (7, 1, 'done', 'Old run');
+  `);
   old.close();
   const db = openDb(file);
+  assert.equal(db.listRuns({ kind: "contact", id: 1 })[0].summary, "Old run");
   const byName = Object.fromEntries(db.listContacts().map((c) => [c.name, c]));
   assert.equal(byName.Prof.role, "Professor");
   assert.equal(byName.Student.role, "PhD");
@@ -175,4 +196,10 @@ test("databases from earlier versions are migrated", () => {
   assert.deepEqual(byName.Prof.orgs.map((o) => o.name), ["McGill", "UBC"]);
   assert.deepEqual(byName.Student.orgs.map((o) => [o.name, o.type]), [["UBC", "School"]]);
   assert.equal(db.listOrgs().length, 2);
+  assert.equal(byName.Prof.relationship_status, "");
+  // Organizations can be researched too now.
+  const orgId = db.listOrgs()[0].id;
+  const run = db.startRun({ kind: "org", id: orgId });
+  assert.equal(db.getRun(run)!.org_id, orgId);
+  assert.equal(db.getRun(run)!.contact_id, null);
 });

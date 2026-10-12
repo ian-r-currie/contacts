@@ -4,9 +4,10 @@ A personal contact tracker for keeping up with people you meet: students, profes
 
 - **A spreadsheet-like table.** Click any cell to edit it. Sort by any column and search everything.
 - **Quick add.** Type just a name and press Enter. Fill in the rest later yourself, or let the research agent do it.
-- **Real many-to-many relationships.** "Related to" links point at actual contacts. They work in both directions, can carry a note ("met at the HCI social"), and you can create a new person straight from the link box.
+- **Real many-to-many relationships.** "Related to" links point at actual contacts. They work in both directions, and you can create a new person straight from the link box. Each link can optionally have a type (friends, mentorship, supervisor…) and a note: hover a link to add them. Neither is required.
+- **Relationship status.** A free-text column (e.g. "Emailed", "Met in person"). The app suggests values you've used before, and import reads a "Relationship status" column.
 - **Organizations.** Schools, labs, institutes, companies and groups all live on the **Organizations** page, with a type, website, description, and an optional "part of" parent (e.g. a lab that's part of U of T). Each person can belong to any number of them.
-- **Network web.** Switch to **Network** to see everyone and their connections, with each organization drawn as a bubble around its people, Venn-style. Someone in two organizations sits where the bubbles overlap, and a sub-organization's bubble sits inside its parent's. Click a person to highlight their connections and organizations, or click a bubble to highlight who's in it. Drag people around, and scroll or pinch to zoom.
+- **Network web.** Switch to **Network** to see everyone and their connections, with each organization drawn as a bubble around its people, Venn-style. Someone in two organizations sits where the bubbles overlap, and a sub-organization's bubble sits inside its parent's. Click a person or a bubble to open its details on the right; clicking another one switches the panel, and clicking empty space closes it. The selected person's relationship types show on their lines. **Colour by** colours people by role or relationship status. Drag people around, and scroll or pinch to zoom.
 - **People outside your network.** Someone who is only listed as a connection (e.g. a friend of a friend) appears in the web as a hollow dashed node but stays out of your contacts list. Open them and click **Add to my contacts** to bring them in. Adding someone by a name that already exists as a connection does the same.
 - **Current organization.** When someone has several organizations, click one to mark it as current (where they are now). You can mark more than one, e.g. their current school and lab. With a single organization, that one is current.
 - **Last contacted.** A **✓ Contacted today** button also clears a follow-up that has come due.
@@ -55,12 +56,16 @@ You can delete the CSV files afterwards. The database is the source of truth.
 
 ## Research agent
 
+Both people and organizations have a **✦ Research** tab (also the ✦ next to each name in the tables).
+
 Set `ANTHROPIC_API_KEY` in `.env` and restart the server. The agent uses Claude (`claude-sonnet-5-5`, the latest Sonnet, by default; override it with `RESEARCH_MODEL`) with web search and web fetch. It can fill in name, role, department, organizations, research, website and email:
 
 - **Empty fields** are filled automatically.
 - **Fields you already have** become suggestions, never silent overwrites.
 - **Organizations** are only ever added. If the person has none, the ones found are added, with their type and current status. Otherwise any new ones are offered as a suggestion.
 - **Emails** are only recorded when they are published somewhere; it doesn't guess them.
+
+For organizations, it fills in the name (replacing a placeholder like a bare domain), type, website, description and the organization it's part of, on the same terms. It is given the names of organizations you already have, so it reuses them instead of creating near-duplicates.
 
 Every run is saved with its summary and sources in the contact's Research tab. Server-side refusal fallback is enabled, so if a request is declined by a safety classifier, the API retries it on a fallback model instead of failing the run.
 

@@ -10,7 +10,7 @@ type Props = {
   orgs: Org[];
   query: string;
   selectedId?: number;
-  onOpen: (id: number) => void;
+  onOpen: (id: number, tab?: "details" | "research") => void;
   onOpenContact: (id: number) => void;
   onChanged: () => void;
   notify: (msg: string) => void;
@@ -124,6 +124,14 @@ export function OrgTable({ orgs, query, selectedId, onOpen, onOpenContact, onCha
                     <button className="name-link" onClick={() => onOpen(o.id)}>
                       {depth > 0 && <span className="tree-mark">↳ </span>}
                       {o.name}
+                    </button>
+                    <button
+                      className="icon-btn research-btn"
+                      title="Research this organization"
+                      aria-label={`Research ${o.name}`}
+                      onClick={() => onOpen(o.id, "research")}
+                    >
+                      ✦
                     </button>
                   </div>
                 </td>

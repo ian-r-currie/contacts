@@ -13,8 +13,8 @@ type Props = {
 export function RelatedEditor({ contact, contacts, onOpen, onChanged, notify }: Props) {
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
-  const [editingNote, setEditingNote] = useState<number | null>(null);
-  const [noteDraft, setNoteDraft] = useState("");
+  const [editing, setEditing] = useState<{ id: number; field: "kind" | "note" } | null>(null);
+  const [draft, setDraft] = useState("");
 
   const relatedIds = new Set(contact.related.map((r) => r.id));
   const q = query.trim().toLowerCase();
@@ -48,11 +48,41 @@ export function RelatedEditor({ contact, contacts, onOpen, onChanged, notify }: 
     }
   };
 
-  const saveNote = async (otherId: number) => {
-    setEditingNote(null);
-    await api.relate(contact.id, otherId, noteDraft.trim());
+  const save = async () => {
+    if (!editing) return;
+    setEditing(null);
+    await api.relate(contact.id, editing.id, { [editing.field]: draft.trim() });
     onChanged();
   };
+
+  /** Inline editor for a relationship's type or note. Both are optional and hidden until hovered when empty. */
+  const detail = (r: Contact["related"][number], field: "kind" | "note") =>
+    editing?.id === r.id && editing.field === field ? (
+      <input
+        className={field === "kind" ? "kind-input" : "note-input"}
+        autoFocus
+        value={draft}
+        list={field === "kind" ? "relation-kind-options" : undefined}
+        placeholder={field === "kind" ? "Friends, mentorship…" : "How are they connected?"}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+          if (e.key === "Escape") setEditing(null);
+        }}
+      />
+    ) : (
+      <button
+        className={`${field === "kind" ? "kind-pill" : "note"} ${r[field] ? "" : "placeholder"}`}
+        title={field === "kind" ? "Type of relationship (optional)" : "Note (optional)"}
+        onClick={() => {
+          setDraft(r[field]);
+          setEditing({ id: r.id, field });
+        }}
+      >
+        {r[field] || (field === "kind" ? "+ type" : "add note")}
+      </button>
+    );
 
   return (
     <div className="related-editor">
@@ -62,30 +92,8 @@ export function RelatedEditor({ contact, contacts, onOpen, onChanged, notify }: 
             <button className={`tag person ${r.in_network ? "" : "outside"}`} title={r.in_network ? undefined : "Outside your network"} onClick={() => onOpen(r.id)}>
               {r.name}
             </button>
-            {editingNote === r.id ? (
-              <input
-                className="note-input"
-                autoFocus
-                value={noteDraft}
-                placeholder="How are they connected?"
-                onChange={(e) => setNoteDraft(e.target.value)}
-                onBlur={() => saveNote(r.id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") saveNote(r.id);
-                  if (e.key === "Escape") setEditingNote(null);
-                }}
-              />
-            ) : (
-              <button
-                className={`note ${r.note ? "" : "placeholder"}`}
-                onClick={() => {
-                  setNoteDraft(r.note);
-                  setEditingNote(r.id);
-                }}
-              >
-                {r.note || "add note"}
-              </button>
-            )}
+            {detail(r, "kind")}
+            {detail(r, "note")}
             <button
               className="icon-btn remove"
               title={`Unlink ${r.name}`}
