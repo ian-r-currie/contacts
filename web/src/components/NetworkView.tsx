@@ -25,7 +25,8 @@ const EMPTY_R = 20;
 const BASE_PAD = 24;
 const LEVEL_PAD = 16;
 
-const nodeRadius = (degree: number) => 6 + Math.sqrt(degree) * 2.5;
+/** Every person is drawn the same size. */
+const NODE_R = 7;
 const personMatches = (c: Contact, q: string) =>
   [c.name, c.role, c.department, c.research, ...c.orgs.map((o) => o.name)].some((v) => v.toLowerCase().includes(q));
 
@@ -120,7 +121,7 @@ export function NetworkView({ contacts, orgs, query, focusId, onOpen, onOpenOrg 
       id: `p${c.id}`,
       contact: c,
       degree: c.related.length,
-      r: nodeRadius(c.related.length),
+      r: NODE_R,
       ...placed(`p${c.id}`),
     }));
     const orgNodes: OrgNode[] = showOrgs ? orgs.map((o) => ({ kind: "org", id: `o${o.id}`, org: o, ...placed(`o${o.id}`) })) : [];
