@@ -2,8 +2,6 @@ export const FIELDS = [
   "name",
   "role",
   "department",
-  "schools",
-  "current_school",
   "research",
   "website",
   "email",
@@ -12,14 +10,14 @@ export const FIELDS = [
   "notes",
 ] as const;
 export type Field = (typeof FIELDS)[number];
-export type ResearchableField = "name" | "role" | "department" | "schools" | "research" | "website" | "email";
+export type ResearchableField = "name" | "role" | "department" | "organizations" | "research" | "website" | "email";
 
-export const LABELS: Record<Field | "related" | "updated_at", string> = {
+export const LABELS: Record<Field | "orgs" | "organizations" | "related" | "updated_at", string> = {
   name: "Name",
   role: "Role",
   department: "Department",
-  schools: "Schools",
-  current_school: "Current school",
+  orgs: "Organizations",
+  organizations: "Organizations",
   research: "Research",
   website: "Website",
   email: "Email",
@@ -31,9 +29,27 @@ export const LABELS: Record<Field | "related" | "updated_at", string> = {
 };
 
 export type Relation = { id: number; name: string; note: string; in_network: boolean };
+/** A person's link to an organization. `current` marks where they are now. */
+export type Membership = { id: number; name: string; type: string; current: boolean };
 /** in_network is false for people who are only someone's connection, not tracked as contacts themselves. */
-export type Contact = { id: number; in_network: boolean; created_at: string; updated_at: string; related: Relation[] } & Record<Field, string>;
-export type ContactInput = Partial<Record<Field, string>> & { in_network?: boolean };
+export type Contact = {
+  id: number;
+  in_network: boolean;
+  created_at: string;
+  updated_at: string;
+  related: Relation[];
+  orgs: Membership[];
+} & Record<Field, string>;
+/** `orgs` replaces the person's organizations with these names (created as needed). */
+export type ContactInput = Partial<Record<Field, string>> & { in_network?: boolean; orgs?: string[] };
+
+export const ORG_FIELDS = ["name", "type", "website", "description", "notes"] as const;
+export type OrgField = (typeof ORG_FIELDS)[number];
+export type OrgMember = { id: number; name: string; in_network: boolean; current: boolean };
+/** A school, lab, institute, company, group… Schools are organizations of type "School". */
+export type Org = { id: number; parent_id: number | null; created_at: string; updated_at: string; members: OrgMember[] } & Record<OrgField, string>;
+export type OrgInput = Partial<Record<OrgField, string>> & { parent_id?: number | null };
+export const ORG_TYPES = ["School", "Lab", "Institute", "Department", "Company", "Group", "Nonprofit", "Government"];
 
 export type ResearchRun = {
   id: number;
@@ -57,10 +73,11 @@ export type ResearchEvent =
   | { type: "error"; message: string };
 
 export type AppConfig = { researchEnabled: boolean; vapidPublicKey: string; today: string };
-export type ImportTarget = Field | "related" | "updated" | "ignore";
+export type ImportKind = "people" | "orgs";
 export type ImportPreview = {
+  kind: ImportKind;
   headers: string[];
-  mapping: Record<string, ImportTarget>;
+  mapping: Record<string, string>;
   rowCount: number;
   sample: string[][];
   suggestedRole: string;
@@ -100,9 +117,17 @@ export const api = {
   relate: (id: number, otherId: number, note?: string) => request<Contact>("PUT", `/api/contacts/${id}/related/${otherId}`, { note }),
   unrelate: (id: number, otherId: number) => request<Contact>("DELETE", `/api/contacts/${id}/related/${otherId}`),
 
-  importPreview: (csv: string) => request<ImportPreview>("POST", "/api/import/preview", { csv }),
-  importCsv: (csv: string, role: string, mapping: Record<string, ImportTarget>) =>
-    request<ImportSummary>("POST", "/api/import", { csv, role, mapping }),
+  importPreview: (csv: string, kind?: ImportKind) => request<ImportPreview>("POST", "/api/import/preview", { csv, kind }),
+  importCsv: (csv: string, kind: ImportKind, role: string, mapping: Record<string, string>) =>
+    request<ImportSummary>("POST", "/api/import", { csv, kind, role, mapping }),
+
+  setMembership: (id: number, orgId: number, current?: boolean) => request<Contact>("PUT", `/api/contacts/${id}/orgs/${orgId}`, { current }),
+  removeMembership: (id: number, orgId: number) => request<Contact>("DELETE", `/api/contacts/${id}/orgs/${orgId}`),
+
+  orgs: () => request<Org[]>("GET", "/api/orgs"),
+  createOrg: (fields: OrgInput & { name: string }) => request<Org>("POST", "/api/orgs", fields),
+  updateOrg: (id: number, fields: OrgInput) => request<Org>("PATCH", `/api/orgs/${id}`, fields),
+  removeOrg: (id: number) => request("DELETE", `/api/orgs/${id}`),
 
   researchRuns: (id: number) => request<{ runs: ResearchRun[]; running: number | null }>("GET", `/api/contacts/${id}/research`),
   startResearch: (id: number, instructions: string) => request<{ runId: number }>("POST", `/api/contacts/${id}/research`, { instructions }),
@@ -140,16 +165,14 @@ export function dueState(date: string, today = localToday()): DueState {
   return "later";
 }
 
-export function splitSchools(schools: string): string[] {
-  return schools
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+/** Where someone is now: memberships marked current, or their only organization. */
+export function currentOrgs(c: Pick<Contact, "orgs">): Membership[] {
+  const marked = c.orgs.filter((o) => o.current);
+  return marked.length ? marked : c.orgs.length === 1 ? c.orgs : [];
 }
 
-/** The highlighted school: the one marked current, or the only one listed. */
-export function currentSchool(c: Pick<Contact, "schools" | "current_school">): string {
-  const list = splitSchools(c.schools);
-  const marked = list.find((s) => s.toLowerCase() === c.current_school.trim().toLowerCase());
-  return marked ?? (list.length === 1 ? list[0] : "");
+/** Short "where they are" text for subtitles and cards. */
+export function orgSummary(c: Pick<Contact, "orgs">): string {
+  const current = currentOrgs(c);
+  return (current.length ? current : c.orgs.slice(0, 1)).map((o) => o.name).join(", ");
 }

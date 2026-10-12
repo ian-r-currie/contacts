@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { config, hasAnthropicCredentials } from "./config.ts";
-import { RESEARCHABLE_FIELDS, splitSchools, type ContactWithRelations, type DB, type ResearchableField, type ResearchRun } from "./db.ts";
+import { RESEARCHABLE_FIELDS, splitList, type ContactWithRelations, type OrgRef, type DB, type ResearchableField, type ResearchRun } from "./db.ts";
 
 export type ResearchEvent =
   | { type: "status"; text: string }
@@ -59,7 +59,13 @@ export function startResearch(db: DB, contactId: number, instructions = ""): Job
   return job;
 }
 
-const FieldsSchema = z.object(Object.fromEntries(RESEARCHABLE_FIELDS.map((f) => [f, z.string().nullable()])) as Record<ResearchableField, z.ZodNullable<z.ZodString>>);
+type TextField = Exclude<ResearchableField, "organizations">;
+const TEXT_FIELDS = RESEARCHABLE_FIELDS.filter((f): f is TextField => f !== "organizations");
+const OrgSchema = z.object({ name: z.string(), type: z.string(), current: z.boolean() });
+const FieldsSchema = z.object({
+  ...(Object.fromEntries(TEXT_FIELDS.map((f) => [f, z.string().nullable()])) as Record<TextField, z.ZodNullable<z.ZodString>>),
+  organizations: z.array(OrgSchema).nullable(),
+});
 const FindingsSchema = z.object({
   fields: FieldsSchema,
   summary: z.string(),
@@ -71,7 +77,8 @@ const FIELD_GUIDE: Record<ResearchableField, string> = {
   name: "Full name as the person writes it professionally.",
   role: 'Current position, e.g. "Professor", "Associate Professor", "3rd year PhD Candidate", "Masters Student".',
   department: 'Department or program, e.g. "Computer Science".',
-  schools: "Institutions they are or were affiliated with (current first), comma-separated, short common names (e.g. \"U of T, UBC\").",
+  organizations:
+    'Schools, labs, institutes, companies and groups they are or were part of. Use short common names (e.g. "U of T", "UBC", "Vector Institute"), a type ("School", "Lab", "Institute", "Company", "Group"…), and current=true for affiliations they hold now.',
   research: "Short comma-separated list of research areas or interests (under ~20 words).",
   website: "Personal or official profile page URL (prefer a personal site, then a lab or faculty page, then Google Scholar).",
   email: "Public email address, only if explicitly published by the person or their institution. Never guess a pattern.",
@@ -90,9 +97,21 @@ const SAVE_TOOL: Anthropic.Beta.BetaTool = {
         type: "object",
         additionalProperties: false,
         required: [...RESEARCHABLE_FIELDS],
-        properties: Object.fromEntries(
-          RESEARCHABLE_FIELDS.map((f) => [f, { type: ["string", "null"], description: `${FIELD_GUIDE[f]} null if not found with confidence.` }]),
-        ),
+        properties: {
+          ...Object.fromEntries(
+            TEXT_FIELDS.map((f) => [f, { type: ["string", "null"], description: `${FIELD_GUIDE[f]} null if not found with confidence.` }]),
+          ),
+          organizations: {
+            type: ["array", "null"],
+            description: `${FIELD_GUIDE.organizations} null if none found with confidence.`,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["name", "type", "current"],
+              properties: { name: { type: "string" }, type: { type: "string" }, current: { type: "boolean" } },
+            },
+          },
+        },
       },
       summary: { type: "string", description: "2-4 sentence plain-text background on the person, useful before reaching out." },
       sources: {
@@ -111,22 +130,23 @@ const SAVE_TOOL: Anthropic.Beta.BetaTool = {
 
 const SYSTEM = `You research people for a personal contacts list kept by a student who networks with researchers and academics (mostly around the University of Toronto).
 
-Use web search and web fetch to find accurate, current public information about the person described. Disambiguate carefully: use the known details (school, department, related people, website) to make sure every finding is about this same person. Prefer official sources (personal sites, university and lab pages, Google Scholar). If a known detail looks outdated or wrong, report what you found.
+Use web search and web fetch to find accurate, current public information about the person described. Disambiguate carefully: use the known details (organizations, department, related people, website) to make sure every finding is about this same person. Prefer official sources (personal sites, university and lab pages, Google Scholar). If a known detail looks outdated or wrong, report what you found.
 
 When finished, call save_findings exactly once. Set a field to null when you could not find it with confidence. Do not invent or infer email addresses.`;
 
 function describeContact(c: ContactWithRelations): string {
   const lines = [`Name: ${c.name}`];
-  for (const f of ["role", "department", "schools", "current_school", "research", "website", "email", "notes"] as const) {
-    if (c[f]) lines.push(`${f[0].toUpperCase()}${f.slice(1).replace("_", " ")}: ${c[f]}`);
+  for (const f of ["role", "department", "research", "website", "email", "notes"] as const) {
+    if (c[f]) lines.push(`${f[0].toUpperCase()}${f.slice(1)}: ${c[f]}`);
   }
+  if (c.orgs.length) lines.push(`Organizations: ${formatOrgs(c.orgs)}`);
   if (c.related.length) lines.push(`Related to: ${c.related.map((r) => r.name + (r.note ? ` (${r.note})` : "")).join(", ")}`);
   return lines.join("\n");
 }
 
 async function runAgent(contact: ContactWithRelations, instructions: string, emit: (e: ResearchEvent) => void): Promise<Findings> {
   const client = new Anthropic();
-  const missing = RESEARCHABLE_FIELDS.filter((f) => !contact[f] || /^Unknown \(/.test(contact[f]));
+  const missing = RESEARCHABLE_FIELDS.filter((f) => (f === "organizations" ? !contact.orgs.length : !contact[f] || /^Unknown \(/.test(contact[f])));
   const prompt = [
     "Research this person:",
     describeContact(contact),
@@ -209,17 +229,24 @@ function applyFindings(db: DB, runId: number, contactId: number, findings: Findi
 
   const applied: ResearchRun["applied"] = {};
   const suggestions: ResearchRun["suggestions"] = {};
-  for (const f of RESEARCHABLE_FIELDS) {
+  const patch: Partial<Record<TextField, string>> = {};
+  for (const f of TEXT_FIELDS) {
     const found = clean(findings.fields[f]);
     if (!found) continue;
     const current = clean(contact[f]);
     const placeholder = f === "name" && /^Unknown \(/.test(current);
-    if (!current || placeholder) applied[f] = found;
+    if (!current || placeholder) applied[f] = patch[f] = found;
     else if (current.toLowerCase() !== found.toLowerCase()) suggestions[f] = found;
   }
-  // The agent lists schools current-first, so a freshly filled list also gets its current school.
-  const schools = applied.schools ? splitSchools(applied.schools) : [];
-  db.updateContact(contactId, schools.length > 1 && !contact.current_school ? { ...applied, current_school: schools[0] } : applied);
+  db.updateContact(contactId, patch);
+
+  // Organizations are only ever added: all of them when the person has none yet, otherwise new ones are suggested.
+  const known = new Set(contact.orgs.map((o) => o.name.toLowerCase()));
+  const newOrgs = (findings.fields.organizations ?? []).filter((o) => o.name.trim() && !known.has(o.name.trim().toLowerCase()));
+  if (newOrgs.length && contact.orgs.length === 0) {
+    db.addContactOrgs(contactId, newOrgs);
+    applied.organizations = formatOrgs(newOrgs);
+  } else if (newOrgs.length) suggestions.organizations = formatOrgs(newOrgs);
   db.finishRun(runId, { summary: findings.summary.trim(), sources: findings.sources, applied, suggestions });
   return db.getRun(runId)!;
 }
@@ -228,13 +255,14 @@ function applyFindings(db: DB, runId: number, contactId: number, findings: Findi
 export function acceptSuggestions(db: DB, runId: number, fields: ResearchableField[]): ResearchRun {
   const run = db.getRun(runId);
   if (!run) throw new Error("Run not found");
-  const patch: Partial<Record<ResearchableField, string>> = {};
+  const patch: Partial<Record<TextField, string>> = {};
   const suggestions = { ...run.suggestions };
   const applied = { ...run.applied };
   for (const f of fields) {
     const value = suggestions[f];
     if (value === undefined) continue;
-    patch[f] = value;
+    if (f === "organizations") db.addContactOrgs(run.contact_id, parseOrgs(value));
+    else patch[f] = value;
     applied[f] = value;
     delete suggestions[f];
   }
@@ -250,6 +278,20 @@ export function dismissSuggestions(db: DB, runId: number, fields: ResearchableFi
   for (const f of fields) delete suggestions[f];
   db.updateRunSuggestions(runId, run.applied, suggestions);
   return db.getRun(runId)!;
+}
+
+/** "U of T (School, current), Vector Institute (Institute)": readable in the UI and parseable back. */
+function formatOrgs(orgs: OrgRef[]): string {
+  return orgs.map((o) => `${o.name.trim()}${o.type || o.current ? ` (${[o.type, o.current ? "current" : ""].filter(Boolean).join(", ")})` : ""}`).join(", ");
+}
+
+function parseOrgs(text: string): OrgRef[] {
+  return text.split(/,\s*(?![^()]*\))/).flatMap((part) => {
+    const m = part.trim().match(/^(.*?)\s*\(([^()]*)\)$/);
+    if (!m) return part.trim() ? [{ name: part.trim() }] : [];
+    const tags = splitList(m[2]);
+    return [{ name: m[1], type: tags.find((t) => t !== "current") ?? "", current: tags.includes("current") }];
+  });
 }
 
 function describeError(err: unknown): string {

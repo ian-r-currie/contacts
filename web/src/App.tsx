@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, dueState, localToday, type AppConfig, type Contact, type ContactInput } from "./api";
+import { api, ApiError, dueState, localToday, orgSummary, ORG_TYPES, type AppConfig, type Contact, type ContactInput, type Org } from "./api";
 import { ContactTable, type Column, type SortKey, ALL_COLUMNS, DEFAULT_COLUMNS } from "./components/ContactTable";
 import { DetailPanel, type PanelTab } from "./components/DetailPanel";
 import { ImportDialog } from "./components/ImportDialog";
 import { Menu } from "./components/Menu";
 import { NetworkView } from "./components/NetworkView";
+import { OrgPanel } from "./components/OrgPanel";
+import { OrgTable } from "./components/OrgTable";
 import { disablePush, enablePush, pushState, registerServiceWorker, type PushState } from "./push";
 
 const load = <T,>(key: string, fallback: T): T => {
@@ -61,19 +63,29 @@ function Login({ onDone }: { onDone: () => void }) {
 
 function Main({ authRequired }: { authRequired: boolean }) {
   const [contacts, setContacts] = useState<Contact[] | null>(null);
+  const [orgs, setOrgs] = useState<Org[]>([]);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [query, setQuery] = useState("");
-  const [view, setView] = useState<"table" | "network">(() => load("view", "table"));
+  const [view, setView] = useState<View>(() => {
+    const saved = load<string>("view", "people");
+    return saved === "orgs" || saved === "network" ? saved : "people";
+  });
   const [showOutside, setShowOutside] = useState(false);
   const [dueOnly, setDueOnly] = useState(false);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>(() => load("sort", { key: "name" as SortKey, dir: 1 as const }));
-  const [columns, setColumns] = useState<Column[]>(() => load("columns", DEFAULT_COLUMNS).filter((c) => ALL_COLUMNS.includes(c)));
+  const [columns, setColumns] = useState<Column[]>(() =>
+    // "schools" became "orgs" when schools turned into organizations.
+    load<string[]>("columns", DEFAULT_COLUMNS)
+      .map((c) => (c === "schools" ? "orgs" : c))
+      .filter((c): c is Column => ALL_COLUMNS.includes(c as Column)),
+  );
   const [selected, setSelected] = useState<{ id: number; tab: PanelTab } | null>(() => {
     const id = Number(new URLSearchParams(location.search).get("contact"));
     return id ? { id, tab: "details" } : null;
   });
+  const [selectedOrgId, setSelectedOrgId] = useState<number | null>(() => Number(new URLSearchParams(location.search).get("org")) || null);
   const [importing, setImporting] = useState(false);
   const [push, setPush] = useState<PushState>("unsupported");
   const [newName, setNewName] = useState("");
@@ -87,7 +99,9 @@ function Main({ authRequired }: { authRequired: boolean }) {
 
   const refresh = useCallback(async () => {
     try {
-      setContacts(await api.contacts());
+      const [people, organizations] = await Promise.all([api.contacts(), api.orgs()]);
+      setContacts(people);
+      setOrgs(organizations);
       setError("");
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) location.reload();
@@ -109,13 +123,25 @@ function Main({ authRequired }: { authRequired: boolean }) {
   useEffect(() => save("sort", sort), [sort]);
   useEffect(() => save("columns", columns), [columns]);
 
-  // Reflect the open contact in the URL so notifications and reloads land on it.
+  // Reflect the open contact or organization in the URL so notifications and reloads land on it.
   useEffect(() => {
     const url = new URL(location.href);
     if (selected) url.searchParams.set("contact", String(selected.id));
     else url.searchParams.delete("contact");
+    if (selectedOrgId) url.searchParams.set("org", String(selectedOrgId));
+    else url.searchParams.delete("org");
     history.replaceState(null, "", url);
-  }, [selected]);
+  }, [selected, selectedOrgId]);
+
+  // One side panel at a time.
+  const openContact = useCallback((id: number, tab: PanelTab = "details") => {
+    setSelectedOrgId(null);
+    setSelected({ id, tab });
+  }, []);
+  const openOrg = useCallback((id: number) => {
+    setSelected(null);
+    setSelectedOrgId(id);
+  }, []);
 
   const roles = useMemo(() => [...new Set((contacts ?? []).map((c) => c.role).filter(Boolean))].sort(), [contacts]);
   const outsideCount = useMemo(() => (contacts ?? []).filter((c) => !c.in_network).length, [contacts]);
@@ -131,10 +157,11 @@ function Main({ authRequired }: { authRequired: boolean }) {
       if (!c.in_network && !showOutside) return false;
       if (dueOnly && !due.includes(c)) return false;
       if (!q) return true;
-      const hay = [c.name, c.role, c.department, c.schools, c.research, c.email, c.notes, ...c.related.map((r) => r.name)];
+      const hay = [c.name, c.role, c.department, c.research, c.email, c.notes, ...c.orgs.map((o) => o.name), ...c.related.map((r) => r.name)];
       return hay.some((v) => v.toLowerCase().includes(q));
     });
-    const value = (c: Contact) => (sort.key === "related" ? String(c.related.length).padStart(4, "0") : c[sort.key]);
+    const value = (c: Contact) =>
+      sort.key === "related" ? String(c.related.length).padStart(4, "0") : sort.key === "orgs" ? orgSummary(c) : c[sort.key];
     return list.sort((a, b) => {
       const va = value(a);
       const vb = value(b);
@@ -146,7 +173,8 @@ function Main({ authRequired }: { authRequired: boolean }) {
 
   const update = useCallback(
     async (id: number, fields: ContactInput) => {
-      setContacts((list) => list?.map((c) => (c.id === id ? { ...c, ...fields } : c)) ?? null);
+      const { orgs: _orgs, ...simple } = fields;
+      setContacts((list) => list?.map((c) => (c.id === id ? { ...c, ...simple } : c)) ?? null);
       try {
         await api.update(id, fields);
       } catch (err) {
@@ -162,7 +190,7 @@ function Main({ authRequired }: { authRequired: boolean }) {
     const name = newName.trim();
     if (!name) return;
     try {
-      const created = await api.create({ name });
+      const created = view === "orgs" ? await api.createOrg({ name }) : await api.create({ name });
       setNewName("");
       await refresh();
       notify(`Added ${created.name}`);
@@ -186,16 +214,20 @@ function Main({ authRequired }: { authRequired: boolean }) {
   };
 
   const selectedContact = contacts?.find((c) => c.id === selected?.id);
+  const selectedOrg = orgs.find((o) => o.id === selectedOrgId);
 
   return (
-    <div className={`app ${selectedContact ? "with-panel" : ""}`}>
+    <div className={`app ${selectedContact || selectedOrg ? "with-panel" : ""}`}>
       <header className="topbar">
         <h1>Contacts</h1>
-        <input className="search" type="search" placeholder="Search names, schools, research, notes…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <input className="search" type="search" placeholder="Search names, organizations, research, notes…" value={query} onChange={(e) => setQuery(e.target.value)} />
         <Menu label="⋯" title="More">
           <button onClick={() => setImporting(true)}>Import CSV…</button>
           <a href="/api/export.csv" download>
-            Export CSV
+            Export people (CSV)
+          </a>
+          <a href="/api/export-orgs.csv" download>
+            Export organizations (CSV)
           </a>
           {push !== "unsupported" && (
             <button onClick={togglePush} disabled={push === "denied"}>
@@ -227,14 +259,17 @@ function Main({ authRequired }: { authRequired: boolean }) {
 
       <div className="filters">
         <div className="segmented" role="tablist" aria-label="View">
-          <button role="tab" aria-selected={view === "table"} className={view === "table" ? "active" : ""} onClick={() => setView("table")}>
-            Table <span className="count">{networkCount}</span>
+          <button role="tab" aria-selected={view === "people"} className={view === "people" ? "active" : ""} onClick={() => setView("people")}>
+            People <span className="count">{networkCount}</span>
+          </button>
+          <button role="tab" aria-selected={view === "orgs"} className={view === "orgs" ? "active" : ""} onClick={() => setView("orgs")}>
+            Organizations <span className="count">{orgs.length}</span>
           </button>
           <button role="tab" aria-selected={view === "network"} className={view === "network" ? "active" : ""} onClick={() => setView("network")}>
             Network
           </button>
         </div>
-        {view === "table" && (
+        {view === "people" && (
           <>
             <button className={`chip due ${dueOnly ? "active" : ""}`} onClick={() => setDueOnly(!dueOnly)} disabled={!due.length && !dueOnly}>
               Follow-ups due <span className="count">{due.length}</span>
@@ -253,7 +288,9 @@ function Main({ authRequired }: { authRequired: boolean }) {
       </div>
 
       <form className="quick-add" onSubmit={addContact}>
-        <input placeholder="Add someone: type a name and press Enter" value={newName} onChange={(e) => setNewName(e.target.value)} />
+        <input
+          placeholder={view === "orgs" ? "Add an organization: type its name and press Enter" : "Add someone: type a name and press Enter"}
+          value={newName} onChange={(e) => setNewName(e.target.value)} />
         <button className="primary" type="submit" disabled={!newName.trim()}>
           Add
         </button>
@@ -261,6 +298,11 @@ function Main({ authRequired }: { authRequired: boolean }) {
 
       {error && <p className="error banner">{error}</p>}
 
+      <datalist id="org-type-options">
+        {[...new Set([...ORG_TYPES, ...orgs.map((o) => o.type).filter(Boolean)])].map((t) => (
+          <option key={t} value={t} />
+        ))}
+      </datalist>
       <datalist id="role-options">
         {[...new Set(["Professor", ...roles])].map((r) => (
           <option key={r} value={r} />
@@ -278,7 +320,9 @@ function Main({ authRequired }: { authRequired: boolean }) {
             </p>
           </div>
         ) : view === "network" ? (
-          <NetworkView contacts={contacts} query={query} focusId={selected?.id} onOpen={(id) => setSelected({ id, tab: "details" })} />
+          <NetworkView contacts={contacts} orgs={orgs} query={query} focusId={selected?.id} onOpen={openContact} onOpenOrg={openOrg} />
+        ) : view === "orgs" ? (
+          <OrgTable orgs={orgs} query={query} selectedId={selectedOrgId ?? undefined} onOpen={openOrg} onOpenContact={openContact} onChanged={refresh} notify={notify} />
         ) : (
           <ContactTable
             contacts={visible}
@@ -286,8 +330,9 @@ function Main({ authRequired }: { authRequired: boolean }) {
             sort={sort}
             onSort={(key) => setSort((s) => ({ key, dir: s.key === key ? ((-s.dir) as 1 | -1) : 1 }))}
             selectedId={selected?.id}
-            onOpen={(id, tab = "details") => setSelected({ id, tab })}
+            onOpen={openContact}
             onUpdate={update}
+            onChanged={refresh}
             researchEnabled={!!config?.researchEnabled}
           />
         )}
@@ -298,14 +343,30 @@ function Main({ authRequired }: { authRequired: boolean }) {
           key={selectedContact.id}
           contact={selectedContact}
           contacts={contacts ?? []}
+          orgs={orgs}
           tab={selected!.tab}
           onTab={(tab) => setSelected({ id: selectedContact.id, tab })}
           onClose={() => setSelected(null)}
-          onOpen={(id) => setSelected({ id, tab: "details" })}
+          onOpen={(id) => openContact(id)}
+          onOpenOrg={openOrg}
           onUpdate={update}
           onChanged={refresh}
           notify={notify}
           researchEnabled={!!config?.researchEnabled}
+        />
+      )}
+
+      {selectedOrg && (
+        <OrgPanel
+          key={selectedOrg.id}
+          org={selectedOrg}
+          orgs={orgs}
+          contacts={contacts ?? []}
+          onClose={() => setSelectedOrgId(null)}
+          onOpenOrg={openOrg}
+          onOpenContact={(id) => openContact(id)}
+          onChanged={refresh}
+          notify={notify}
         />
       )}
 
@@ -324,11 +385,13 @@ function Main({ authRequired }: { authRequired: boolean }) {
   );
 }
 
+type View = "people" | "orgs" | "network";
+
 const LABEL_FOR: Record<Column, string> = {
   name: "Name",
   role: "Role",
   department: "Department",
-  schools: "Schools",
+  orgs: "Organizations",
   research: "Research",
   related: "Related to",
   email: "Email",

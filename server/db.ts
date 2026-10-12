@@ -8,8 +8,6 @@ export const CONTACT_FIELDS = [
   "name",
   "role",
   "department",
-  "schools",
-  "current_school",
   "research",
   "website",
   "email",
@@ -19,14 +17,25 @@ export const CONTACT_FIELDS = [
 ] as const;
 export type ContactField = (typeof CONTACT_FIELDS)[number];
 
-/** Fields the research agent is allowed to fill in. */
-export const RESEARCHABLE_FIELDS = ["name", "role", "department", "schools", "research", "website", "email"] as const;
+/** Fields the research agent is allowed to fill in. "organizations" maps to memberships rather than a column. */
+export const RESEARCHABLE_FIELDS = ["name", "role", "department", "organizations", "research", "website", "email"] as const;
 export type ResearchableField = (typeof RESEARCHABLE_FIELDS)[number];
 
 /** in_network is false for people who only appear as someone's connection (not tracked as contacts). */
 export type Contact = { id: number; in_network: boolean; created_at: string; updated_at: string } & Record<ContactField, string>;
 export type Relation = { id: number; name: string; note: string; in_network: boolean };
-export type ContactWithRelations = Contact & { related: Relation[] };
+/** A contact's link to an organization. `current` marks where they are now (e.g. their current school). */
+export type Membership = { id: number; name: string; type: string; current: boolean };
+export type ContactWithRelations = Contact & { related: Relation[]; orgs: Membership[] };
+
+/** Organization: a school, lab, institute, company, group… Schools are just organizations of type "School". */
+export const ORG_FIELDS = ["name", "type", "website", "description", "notes"] as const;
+export type OrgField = (typeof ORG_FIELDS)[number];
+export type Org = { id: number; parent_id: number | null; created_at: string; updated_at: string } & Record<OrgField, string>;
+export type OrgMember = { id: number; name: string; in_network: boolean; current: boolean };
+export type OrgWithMembers = Org & { members: OrgMember[] };
+export type OrgInput = Partial<Record<OrgField, string>> & { parent_id?: number | null };
+export type OrgRef = { name: string; type?: string; current?: boolean };
 
 export type ResearchRun = {
   id: number;
@@ -44,11 +53,36 @@ export type ResearchRun = {
 export type ContactInput = Partial<Record<ContactField, string>> & { in_network?: boolean };
 export type DB = ReturnType<typeof openDb>;
 
-export const splitSchools = (schools: string) =>
-  schools
+export const splitList = (value: string) =>
+  value
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+
+const ORG_SCHEMA = `
+CREATE TABLE IF NOT EXISTS organizations (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT '',
+  parent_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
+  website TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS organizations_name ON organizations(name COLLATE NOCASE);
+
+-- Many-to-many: people and the organizations they belong to.
+CREATE TABLE IF NOT EXISTS contact_orgs (
+  contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  org_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  current INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (contact_id, org_id)
+);
+CREATE INDEX IF NOT EXISTS contact_orgs_org ON contact_orgs(org_id);
+`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS contacts (
@@ -57,8 +91,6 @@ CREATE TABLE IF NOT EXISTS contacts (
   in_network INTEGER NOT NULL DEFAULT 1,
   role TEXT NOT NULL DEFAULT '',
   department TEXT NOT NULL DEFAULT '',
-  schools TEXT NOT NULL DEFAULT '',
-  current_school TEXT NOT NULL DEFAULT '',
   research TEXT NOT NULL DEFAULT '',
   website TEXT NOT NULL DEFAULT '',
   email TEXT NOT NULL DEFAULT '',
@@ -80,6 +112,8 @@ CREATE TABLE IF NOT EXISTS relationships (
   CHECK (a_id < b_id)
 );
 CREATE INDEX IF NOT EXISTS relationships_b ON relationships(b_id);
+
+${ORG_SCHEMA}
 
 CREATE TABLE IF NOT EXISTS research_runs (
   id INTEGER PRIMARY KEY,
@@ -138,6 +172,24 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
     return map;
   }
 
+  function membershipsFor(): Map<number, Membership[]> {
+    const map = new Map<number, Membership[]>();
+    const rows = db
+      .prepare(
+        `SELECT m.contact_id, o.id, o.name, o.type, m.current FROM contact_orgs m JOIN organizations o ON o.id = m.org_id
+         ORDER BY m.current DESC, o.name COLLATE NOCASE`,
+      )
+      .all() as { contact_id: number; id: number; name: string; type: string; current: number }[];
+    for (const r of rows) {
+      const list = map.get(r.contact_id) ?? [];
+      list.push({ id: r.id, name: r.name, type: r.type, current: Boolean(r.current) });
+      map.set(r.contact_id, list);
+    }
+    return map;
+  }
+
+  const touchContact = (id: number) => db.prepare("UPDATE contacts SET updated_at = ? WHERE id = ?").run(now(), id);
+
   const api = {
     raw: db,
 
@@ -157,13 +209,14 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
       const rows = db.prepare("SELECT * FROM contacts ORDER BY name COLLATE NOCASE").all() as Record<string, unknown>[];
       const contacts = rows.map(rowToContact);
       const rel = relationsFor(contacts.map((c) => c.id));
-      return contacts.map((c) => ({ ...c, related: rel.get(c.id) ?? [] }));
+      const orgs = membershipsFor();
+      return contacts.map((c) => ({ ...c, related: rel.get(c.id) ?? [], orgs: orgs.get(c.id) ?? [] }));
     },
 
     getContact(id: number): ContactWithRelations | undefined {
       const row = db.prepare("SELECT * FROM contacts WHERE id = ?").get(id) as Record<string, unknown> | undefined;
       if (!row) return undefined;
-      return { ...rowToContact(row), related: relationsFor([id]).get(id) ?? [] };
+      return { ...rowToContact(row), related: relationsFor([id]).get(id) ?? [], orgs: membershipsFor().get(id) ?? [] };
     },
 
     createContact(fields: ContactInput & { name: string }, updatedAt?: string): number {
@@ -189,12 +242,6 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
       const values: Record<string, string | number> = {};
       for (const f of CONTACT_FIELDS) if (fields[f] !== undefined) values[f] = fields[f]!.trim();
       if (fields.in_network !== undefined) values.in_network = fields.in_network ? 1 : 0;
-      // Editing the school list drops a current school that is no longer in it.
-      if (values.schools !== undefined && values.current_school === undefined) {
-        const current = (db.prepare("SELECT current_school FROM contacts WHERE id = ?").get(id) as { current_school: string } | undefined)
-          ?.current_school;
-        if (current && !splitSchools(values.schools as string).some((s) => s.toLowerCase() === current.toLowerCase())) values.current_school = "";
-      }
       const cols = Object.keys(values);
       if (cols.length === 0) return api.getContact(id) !== undefined;
       const sets = cols.map((f) => `${f} = ?`);
@@ -238,6 +285,105 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
 
     markNotified(id: number, followUpDate: string) {
       db.prepare("UPDATE contacts SET follow_up_notified = ? WHERE id = ?").run(followUpDate, id);
+    },
+
+    // --- organizations ---
+    listOrgs(): OrgWithMembers[] {
+      const orgs = db.prepare("SELECT * FROM organizations ORDER BY name COLLATE NOCASE").all() as unknown as Org[];
+      const rows = db
+        .prepare(
+          `SELECT m.org_id, c.id, c.name, c.in_network, m.current FROM contact_orgs m JOIN contacts c ON c.id = m.contact_id
+           ORDER BY c.name COLLATE NOCASE`,
+        )
+        .all() as { org_id: number; id: number; name: string; in_network: number; current: number }[];
+      const members = new Map<number, OrgMember[]>();
+      for (const r of rows) {
+        const list = members.get(r.org_id) ?? [];
+        list.push({ id: r.id, name: r.name, in_network: Boolean(r.in_network), current: Boolean(r.current) });
+        members.set(r.org_id, list);
+      }
+      return orgs.map((o) => ({ ...o, members: members.get(o.id) ?? [] }));
+    },
+
+    getOrg(id: number): OrgWithMembers | undefined {
+      return api.listOrgs().find((o) => o.id === id);
+    },
+
+    findOrg(name: string): Org | undefined {
+      return db.prepare("SELECT * FROM organizations WHERE name = ? COLLATE NOCASE").get(name.trim()) as unknown as Org | undefined;
+    },
+
+    createOrg(fields: OrgInput & { name: string }): number {
+      const cols = ORG_FIELDS.filter((f) => fields[f] !== undefined);
+      const result = db
+        .prepare(`INSERT INTO organizations (${[...cols, "parent_id"].join(", ")}) VALUES (${[...cols, ""].map(() => "?").join(", ")})`)
+        .run(...cols.map((f) => fields[f]!.trim()), fields.parent_id ?? null);
+      return Number(result.lastInsertRowid);
+    },
+
+    /** Finds an organization by name (case-insensitive) or creates it. Fills its type if it had none. */
+    ensureOrg(name: string, defaults: OrgInput = {}): number {
+      const existing = api.findOrg(name);
+      if (!existing) return api.createOrg({ ...defaults, name: name.trim() });
+      if (!existing.type && defaults.type) api.updateOrg(existing.id, { type: defaults.type });
+      return existing.id;
+    },
+
+    updateOrg(id: number, fields: OrgInput): boolean {
+      const values: Record<string, string | number | null> = {};
+      for (const f of ORG_FIELDS) if (fields[f] !== undefined) values[f] = fields[f]!.trim();
+      if (fields.parent_id !== undefined) {
+        // Refuse cycles: the new parent can't be this org or one of its descendants.
+        for (let p = fields.parent_id; p != null; ) {
+          if (p === id) throw new Error("An organization can't be part of itself");
+          p = (db.prepare("SELECT parent_id FROM organizations WHERE id = ?").get(p) as { parent_id: number | null } | undefined)?.parent_id ?? null;
+        }
+        values.parent_id = fields.parent_id;
+      }
+      const cols = Object.keys(values);
+      if (cols.length === 0) return api.getOrg(id) !== undefined;
+      return (
+        db.prepare(`UPDATE organizations SET ${cols.map((c) => `${c} = ?`).join(", ")}, updated_at = ? WHERE id = ?`).run(...cols.map((c) => values[c]), now(), id)
+          .changes > 0
+      );
+    },
+
+    deleteOrg(id: number): boolean {
+      return db.prepare("DELETE FROM organizations WHERE id = ?").run(id).changes > 0;
+    },
+
+    /** Adds (or updates the current flag of) one membership. */
+    setMembership(contactId: number, orgId: number, current?: boolean, touch = true) {
+      db.prepare(
+        `INSERT INTO contact_orgs (contact_id, org_id, current) VALUES (?, ?, ?)
+         ON CONFLICT (contact_id, org_id) DO UPDATE SET current = CASE WHEN ? IS NULL THEN current ELSE excluded.current END`,
+      ).run(contactId, orgId, current ? 1 : 0, current === undefined ? null : current ? 1 : 0);
+      if (touch) touchContact(contactId);
+    },
+
+    removeMembership(contactId: number, orgId: number): boolean {
+      const removed = db.prepare("DELETE FROM contact_orgs WHERE contact_id = ? AND org_id = ?").run(contactId, orgId).changes > 0;
+      if (removed) touchContact(contactId);
+      return removed;
+    },
+
+    /** Replaces a contact's organizations with this list of names, creating organizations as needed. Keeps current flags. */
+    setContactOrgs(contactId: number, names: string[], defaults: OrgInput = {}) {
+      const ids = [...new Set(names.map((n) => n.trim()).filter(Boolean).map((n) => api.ensureOrg(n, defaults)))];
+      db.prepare(`DELETE FROM contact_orgs WHERE contact_id = ? AND org_id NOT IN (${ids.map(() => "?").join(", ") || "NULL"})`).run(
+        contactId,
+        ...ids,
+      );
+      for (const id of ids) api.setMembership(contactId, id);
+      touchContact(contactId);
+    },
+
+    /** Adds organizations without removing any. `touch: false` leaves updated_at alone (imports keep the sheet's date). */
+    addContactOrgs(contactId: number, refs: OrgRef[], { touch = true } = {}) {
+      for (const ref of refs) {
+        if (!ref.name.trim()) continue;
+        api.setMembership(contactId, api.ensureOrg(ref.name, { type: ref.type ?? "" }), ref.current || undefined, touch);
+      }
     },
 
     // --- research runs ---
@@ -301,12 +447,14 @@ export function openDb(file = path.join(config.dataDir, "contacts.db")) {
 /**
  * Upgrades databases created by earlier versions:
  * v1: "category" folds into "role" (Professor etc.), adds current_school and in_network.
+ * v2: schools become organizations (type "School") linked through contact_orgs.
  */
+const LATEST_VERSION = 2;
 function migrate(db: DatabaseSync) {
   const version = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
   const hasContacts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'contacts'").get();
   if (!hasContacts) {
-    db.exec("PRAGMA user_version = 1");
+    db.exec(`PRAGMA user_version = ${LATEST_VERSION}`);
     return;
   }
   if (version < 1) {
@@ -322,6 +470,30 @@ function migrate(db: DatabaseSync) {
           AND notes = '' AND last_contacted = '' AND follow_up_date = ''
           AND id IN (SELECT a_id FROM relationships UNION SELECT b_id FROM relationships);
       PRAGMA user_version = 1;
+    `);
+    db.exec("COMMIT");
+  }
+  if (version < 2) {
+    db.exec("BEGIN");
+    db.exec(ORG_SCHEMA);
+    const rows = db.prepare("SELECT id, schools, current_school FROM contacts WHERE schools != ''").all() as {
+      id: number;
+      schools: string;
+      current_school: string;
+    }[];
+    const find = db.prepare("SELECT id FROM organizations WHERE name = ? COLLATE NOCASE");
+    const create = db.prepare("INSERT INTO organizations (name, type) VALUES (?, 'School')");
+    const link = db.prepare("INSERT OR IGNORE INTO contact_orgs (contact_id, org_id, current) VALUES (?, ?, ?)");
+    for (const r of rows) {
+      for (const name of splitList(r.schools)) {
+        const orgId = (find.get(name) as { id: number } | undefined)?.id ?? Number(create.run(name).lastInsertRowid);
+        link.run(r.id, orgId, name.toLowerCase() === r.current_school.trim().toLowerCase() ? 1 : 0);
+      }
+    }
+    db.exec(`
+      ALTER TABLE contacts DROP COLUMN schools;
+      ALTER TABLE contacts DROP COLUMN current_school;
+      PRAGMA user_version = 2;
     `);
     db.exec("COMMIT");
   }

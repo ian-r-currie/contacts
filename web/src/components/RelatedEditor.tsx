@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { api, type Contact } from "../api";
+import { api, orgSummary, type Contact } from "../api";
 
 type Props = {
   contact: Contact;
@@ -128,7 +128,7 @@ export function RelatedEditor({ contact, contacts, onOpen, onChanged, notify }: 
                 <button onMouseDown={(e) => e.preventDefault()} onClick={() => choose(item)} className={i === active ? "active" : ""}>
                   {item.kind === "link" ? (
                     <>
-                      {item.c.name} <span className="muted small">{[item.c.role, item.c.schools].filter(Boolean).join(" · ")}</span>
+                      {item.c.name} <span className="muted small">{[item.c.role, orgSummary(item.c)].filter(Boolean).join(" · ")}</span>
                     </>
                   ) : (
                     <>

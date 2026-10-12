@@ -199,11 +199,17 @@ function RunCard({
               <div key={f} className="kv suggestion">
                 <dt>{LABELS[f]}</dt>
                 <dd>
-                  <div className="was">{contact[f] || "—"}</div>
-                  <div className="now">{v}</div>
+                  {f === "organizations" ? (
+                    <div className="now">+ {v}</div>
+                  ) : (
+                    <>
+                      <div className="was">{contact[f] || "—"}</div>
+                      <div className="now">{v}</div>
+                    </>
+                  )}
                   <div className="kv-actions">
                     <button className="small-btn" onClick={() => onAccept(run, [f])}>
-                      Use this
+                      {f === "organizations" ? "Add these" : "Use this"}
                     </button>
                     <button className="small-btn ghost" onClick={() => onDismiss(run, [f])}>
                       Keep mine

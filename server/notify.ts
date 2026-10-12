@@ -39,7 +39,7 @@ export async function checkFollowUps(db: DB, now = new Date()): Promise<void> {
     const overdue = c.follow_up_date < date;
     await sendToAll(db, {
       title: overdue ? `Overdue follow-up: ${c.name}` : `Follow up with ${c.name}`,
-      body: [overdue ? `Was due ${c.follow_up_date}.` : "Due today.", c.role, c.schools].filter(Boolean).join(" · "),
+      body: [overdue ? `Was due ${c.follow_up_date}.` : "Due today.", c.role, c.department].filter(Boolean).join(" · "),
       url: `/?contact=${c.id}`,
       tag: `follow-up-${c.id}`,
     });

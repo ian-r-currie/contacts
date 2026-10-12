@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { parseCsv } from "./csv.ts";
 import { openDb } from "./db.ts";
-import { importCsv, normalizeDate, splitNames } from "./importer.ts";
+import { importCsv, importOrgsCsv, normalizeDate, previewCsv, splitNames } from "./importer.ts";
 
 const PEOPLE = `Name,Department,Related to,Role,Updated,Schools,Website,Follow-up Date,Notes
 Ada Lovelace,Math,"Charles Babbage, Mary",PhD Candidate,Oct 7 2026,"Cambridge, UCL",https://ada.example.com,"October 17, 2026","Met at a talk
@@ -45,7 +45,13 @@ test("import builds relationships, merges duplicates and matches nameless rows b
 
   const ada = db.listContacts().find((c) => c.name === "Ada Lovelace")!;
   assert.equal(ada.follow_up_date, "2026-10-17");
-  assert.equal(ada.schools, "Cambridge, UCL");
+  assert.deepEqual(
+    ada.orgs.map((o) => [o.name, o.type]),
+    [
+      ["Cambridge", "School"],
+      ["UCL", "School"],
+    ],
+  );
   assert.equal(ada.notes, "Met at a talk\nVery friendly");
   assert.equal(ada.updated_at.slice(0, 10), "2026-10-07");
   assert.deepEqual(ada.related.map((r) => r.name).sort(), ["Charles Babbage", "Grace Hopper", "Mary"]);
@@ -60,6 +66,8 @@ test("import builds relationships, merges duplicates and matches nameless rows b
   assert.equal(babbage.in_network, true); // was only a connection until the profs import
   assert.equal(babbage.research, "Engines");
   assert.equal(babbage.email, "cb@example.com");
+  assert.deepEqual(babbage.orgs.map((o) => o.name), ["Cambridge"]);
+  assert.equal(db.listOrgs().length, 3); // Cambridge (in both files, one org), UCL, Yale
   assert.equal(db.listContacts().find((c) => c.name === "Grace Hopper")!.in_network, true);
   const mary = db.listContacts().find((c) => c.name === "Mary")!;
   assert.equal(mary.website, "https://www.marysomerville.example.org");
@@ -100,16 +108,50 @@ test("follow-up notifications re-arm when the date changes", () => {
   assert.equal(db.dueFollowUps("2026-10-11", true).length, 1);
 });
 
-test("editing schools drops a current school that is no longer listed", () => {
+test("setting a person's organizations keeps current flags and reuses orgs by name", () => {
   const db = openDb(":memory:");
-  const id = db.createContact({ name: "A", schools: "UBC, McGill", current_school: "McGill" });
-  db.updateContact(id, { schools: "UBC, McGill, Queens" });
-  assert.equal(db.getContact(id)!.current_school, "McGill");
-  db.updateContact(id, { schools: "UBC" });
-  assert.equal(db.getContact(id)!.current_school, "");
+  const id = db.createContact({ name: "A" });
+  db.setContactOrgs(id, ["UBC", "McGill"]);
+  const mcgill = db.findOrg("mcgill")!;
+  db.setMembership(id, mcgill.id, true);
+  db.setContactOrgs(id, ["ubc", "McGill", "Vector Institute"]);
+  assert.deepEqual(
+    db.getContact(id)!.orgs.map((o) => [o.name, o.current]),
+    [
+      ["McGill", true],
+      ["UBC", false],
+      ["Vector Institute", false],
+    ],
+  );
+  assert.equal(db.listOrgs().length, 3);
+  db.setContactOrgs(id, ["UBC"]);
+  assert.deepEqual(db.getContact(id)!.orgs.map((o) => o.name), ["UBC"]);
+  assert.equal(db.listOrgs().find((o) => o.name === "McGill")!.members.length, 0); // the org itself stays
 });
 
-test("databases from the first version are migrated", () => {
+test("organization sheets import with parents, website-derived names and merging", () => {
+  const db = openDb(":memory:");
+  const ORGS = `School,Website,Org Name,Description
+Cambridge,https://ethics.example.ac.uk,,Ethics centre
+Cambridge,https://www.example.ac.uk/compute-lab/,Compute Lab,Builds engines
+`;
+  assert.equal(previewCsv(ORGS).kind, "orgs");
+  assert.equal(previewCsv(PEOPLE).kind, "people");
+  const s = importOrgsCsv(db, ORGS);
+  assert.equal(s.created, 2);
+  const orgs = Object.fromEntries(db.listOrgs().map((o) => [o.name, o]));
+  assert.equal(orgs.Cambridge.type, "School");
+  assert.equal(orgs["ethics.example.ac.uk"].parent_id, orgs.Cambridge.id);
+  assert.equal(orgs["Compute Lab"].description, "Builds engines");
+  // Renamed in the app, then re-imported: matched by website, not duplicated.
+  db.updateOrg(orgs["ethics.example.ac.uk"].id, { name: "Ethics Centre" });
+  const again = importOrgsCsv(db, ORGS);
+  assert.equal(again.merged, 2);
+  assert.equal(db.listOrgs().length, 3);
+  assert.throws(() => db.updateOrg(orgs.Cambridge.id, { parent_id: orgs["Compute Lab"].id }), /part of itself/);
+});
+
+test("databases from earlier versions are migrated", () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "contacts-")), "old.db");
   const old = new DatabaseSync(file);
   old.exec(`
@@ -118,7 +160,7 @@ test("databases from the first version are migrated", () => {
       email TEXT NOT NULL DEFAULT '', last_contacted TEXT NOT NULL DEFAULT '', follow_up_date TEXT NOT NULL DEFAULT '',
       follow_up_notified TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');
     CREATE TABLE relationships (a_id INTEGER NOT NULL, b_id INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (a_id, b_id));
-    INSERT INTO contacts (id, name, category, role) VALUES (1, 'Prof', 'Professor', ''), (2, 'Student', 'Contact', 'PhD'), (3, 'Friend', '', ''), (4, 'Loner', '', '');
+    INSERT INTO contacts (id, name, category, role, schools) VALUES (1, 'Prof', 'Professor', '', 'UBC, McGill'), (2, 'Student', 'Contact', 'PhD', 'ubc'), (3, 'Friend', '', '', ''), (4, 'Loner', '', '', '');
     INSERT INTO relationships (a_id, b_id) VALUES (2, 3);
   `);
   old.close();
@@ -129,4 +171,8 @@ test("databases from the first version are migrated", () => {
   assert.equal(byName.Friend.in_network, false);
   assert.equal(byName.Loner.in_network, true);
   assert.ok(!("category" in byName.Prof));
+  assert.ok(!("schools" in byName.Prof));
+  assert.deepEqual(byName.Prof.orgs.map((o) => o.name), ["McGill", "UBC"]);
+  assert.deepEqual(byName.Student.orgs.map((o) => [o.name, o.type]), [["UBC", "School"]]);
+  assert.equal(db.listOrgs().length, 2);
 });

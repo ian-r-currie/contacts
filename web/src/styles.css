@@ -1047,7 +1047,7 @@ button.tag.person.outside {
   stroke-width: 2;
 }
 .node.in .dot {
-  fill: var(--accent);
+  fill: var(--node-in);
 }
 .node.out .dot {
   fill: var(--surface);
@@ -1084,7 +1084,7 @@ button.tag.person.outside {
   font-weight: 600;
 }
 .legend-in {
-  fill: var(--accent);
+  fill: var(--node-in);
 }
 .legend-out {
   fill: none;
@@ -1175,4 +1175,144 @@ button.tag.person.outside {
   .network {
     height: calc(100vh - 170px);
   }
+}
+
+/* --- organizations --- */
+.contacts th > span {
+  display: block;
+  padding: 8px 10px;
+}
+.cell-static {
+  display: block;
+  padding: 8px 10px;
+  white-space: nowrap;
+}
+.contacts .col-people {
+  min-width: 200px;
+}
+.contacts .col-description {
+  min-width: 260px;
+}
+.contacts td > .chips {
+  padding: 6px 8px;
+}
+.tree-mark {
+  color: var(--muted);
+  font-weight: 400;
+}
+.pad-top {
+  padding-top: 6px;
+}
+.related-list .note.is-current {
+  color: var(--accent);
+  font-weight: 500;
+}
+.kind-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 12px 0 4px;
+}
+.kind-switch .segmented {
+  margin: 0;
+}
+
+/* --- organization bubbles (fixed-order categorical hues; past eight, neutral gray) --- */
+:root {
+  --node-in: #334155;
+  --org-0: #8a8a85;
+  --org-1: #2a78d6;
+  --org-2: #eb6834;
+  --org-3: #1baf7a;
+  --org-4: #eda100;
+  --org-5: #e87ba4;
+  --org-6: #008300;
+  --org-7: #6250d6;
+  --org-8: #e34948;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --node-in: #cbd5e1;
+    --org-0: #8a8a85;
+    --org-1: #3987e5;
+    --org-2: #d95926;
+    --org-3: #199e70;
+    --org-4: #c98500;
+    --org-5: #d55181;
+    --org-6: #008300;
+    --org-7: #9085e9;
+    --org-8: #e66767;
+  }
+}
+.bubble {
+  fill: var(--org);
+  fill-opacity: 0.09;
+  stroke: var(--org);
+  stroke-opacity: 0.6;
+  cursor: pointer;
+  transition: fill-opacity 0.15s, stroke-opacity 0.15s;
+}
+.bubble:hover {
+  fill-opacity: 0.14;
+}
+.bubble.selected {
+  fill-opacity: 0.2;
+  stroke-opacity: 1;
+}
+.bubble.focus {
+  fill-opacity: 0.13;
+  stroke-opacity: 0.9;
+}
+.bubble.dim {
+  fill-opacity: 0.03;
+  stroke-opacity: 0.2;
+}
+.bubble-label {
+  text-anchor: middle;
+  font-weight: 600;
+  fill: var(--text);
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+.bubble-label.dim {
+  opacity: 0.3;
+}
+.c0 {
+  --org: var(--org-0);
+}
+.c1 {
+  --org: var(--org-1);
+}
+.c2 {
+  --org: var(--org-2);
+}
+.c3 {
+  --org: var(--org-3);
+}
+.c4 {
+  --org: var(--org-4);
+}
+.c5 {
+  --org: var(--org-5);
+}
+.c6 {
+  --org: var(--org-6);
+}
+.c7 {
+  --org: var(--org-7);
+}
+.c8 {
+  --org: var(--org-8);
+}
+.contacts .col-type {
+  min-width: 100px;
+}
+.contacts .col-parent {
+  min-width: 120px;
+}
+.contacts.orgs .col-people {
+  min-width: 300px;
 }

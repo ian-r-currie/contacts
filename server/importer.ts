@@ -1,13 +1,15 @@
 import { parseCsv } from "./csv.ts";
-import { CONTACT_FIELDS, type ContactField, type DB } from "./db.ts";
+import { CONTACT_FIELDS, splitList, type ContactField, type DB, type OrgField, type OrgInput } from "./db.ts";
 
-export type ImportTarget = ContactField | "related" | "updated" | "ignore";
+export type ImportTarget = ContactField | "organizations" | "related" | "updated" | "ignore";
+export type OrgImportTarget = OrgField | "parent" | "ignore";
+export type ImportKind = "people" | "orgs";
 
 export type ImportOptions = {
   /** Role for rows that don't have one (e.g. "Professor" for a list of profs). */
   role?: string;
   /** Header → target overrides. Headers not listed fall back to the automatic guess. */
-  mapping?: Record<string, ImportTarget>;
+  mapping?: Record<string, string>;
 };
 
 export type ImportSummary = {
@@ -32,11 +34,17 @@ const SYNONYMS: Record<string, ImportTarget> = {
   department: "department",
   dept: "department",
   field: "department",
-  school: "schools",
-  schools: "schools",
-  university: "schools",
-  institution: "schools",
-  affiliation: "schools",
+  school: "organizations",
+  schools: "organizations",
+  university: "organizations",
+  institution: "organizations",
+  affiliation: "organizations",
+  affiliations: "organizations",
+  organization: "organizations",
+  organizations: "organizations",
+  organisation: "organizations",
+  organisations: "organizations",
+  orgs: "organizations",
   research: "research",
   researchinterests: "research",
   researcharea: "research",
@@ -61,21 +69,64 @@ const SYNONYMS: Record<string, ImportTarget> = {
 
 const normHeader = (h: string) => h.toLowerCase().replace(/[^a-z]/g, "");
 
-export function guessMapping(headers: string[]): Record<string, ImportTarget> {
-  return Object.fromEntries(headers.map((h) => [h, SYNONYMS[normHeader(h)] ?? "ignore"]));
+const ORG_SYNONYMS: Record<string, OrgImportTarget> = {
+  orgname: "name",
+  organization: "name",
+  organisation: "name",
+  organizationname: "name",
+  org: "name",
+  name: "name",
+  school: "parent",
+  university: "parent",
+  institution: "parent",
+  parent: "parent",
+  partof: "parent",
+  type: "type",
+  kind: "type",
+  category: "type",
+  website: "website",
+  url: "website",
+  site: "website",
+  homepage: "website",
+  description: "description",
+  about: "description",
+  summary: "description",
+  focus: "description",
+  notes: "notes",
+  note: "notes",
+  comments: "notes",
+};
+
+const normHeaderAll = (headers: string[]) => headers.map((h) => h.toLowerCase().replace(/[^a-z]/g, ""));
+
+/** An organizations sheet names an org column and has no person column. */
+export function guessKind(headers: string[]): ImportKind {
+  const norm = normHeaderAll(headers);
+  const hasOrgName = norm.some((h) => ["orgname", "organizationname", "org", "organization", "organisation"].includes(h));
+  const hasPerson = norm.some((h) => ["professor", "prof", "fullname", "contact", "person"].includes(h));
+  return hasOrgName && !hasPerson ? "orgs" : "people";
 }
 
-export function previewCsv(text: string) {
+export function guessMapping(headers: string[], kind: ImportKind = guessKind(headers)): Record<string, string> {
+  const table: Record<string, string> = kind === "orgs" ? ORG_SYNONYMS : SYNONYMS;
+  return Object.fromEntries(headers.map((h) => [h, table[normHeader(h)] ?? "ignore"]));
+}
+
+export function previewCsv(text: string, forceKind?: ImportKind) {
   const rows = parseCsv(text);
   const headers = rows[0] ?? [];
+  const kind = forceKind ?? guessKind(headers);
   return {
+    kind,
     headers,
-    mapping: guessMapping(headers),
+    mapping: guessMapping(headers, kind),
     rowCount: Math.max(rows.length - 1, 0),
     sample: rows.slice(1, 4),
     suggestedRole: headers.some((h) => normHeader(h).startsWith("prof")) ? "Professor" : "",
   };
 }
+
+const isSchoolHeader = (h: string) => /school|universit/i.test(h);
 
 /** Normalizes assorted human date formats ("Oct 7 2026", "October 17, 2026") to YYYY-MM-DD. Returns null if unparseable. */
 export function normalizeDate(raw: string): string | null {
@@ -129,7 +180,7 @@ export function importCsv(db: DB, text: string, opts: ImportOptions = {}): Impor
   if (rows.length < 2) return summary;
 
   const headers = rows[0];
-  const mapping = { ...guessMapping(headers), ...opts.mapping };
+  const mapping = { ...guessMapping(headers, "people"), ...opts.mapping } as Record<string, ImportTarget>;
   const defaultRole = opts.role?.trim() ?? "";
 
   return db.transaction(() => {
@@ -146,6 +197,7 @@ export function importCsv(db: DB, text: string, opts: ImportOptions = {}): Impor
     for (const [i, row] of rows.slice(1).entries()) {
       const fields: Partial<Record<ContactField, string>> = {};
       const related: string[] = [];
+      const orgs: { name: string; type: string }[] = [];
       let updated: string | undefined;
 
       headers.forEach((h, col) => {
@@ -153,6 +205,7 @@ export function importCsv(db: DB, text: string, opts: ImportOptions = {}): Impor
         const value = (row[col] ?? "").trim();
         if (!value || !target || target === "ignore") return;
         if (target === "related") related.push(...splitNames(value));
+        else if (target === "organizations") orgs.push(...splitList(value).map((name) => ({ name, type: isSchoolHeader(h) ? "School" : "" })));
         else if (target === "updated") updated = normalizeDate(value) || undefined;
         else if (target === "follow_up_date" || target === "last_contacted") {
           const d = normalizeDate(value);
@@ -207,6 +260,7 @@ export function importCsv(db: DB, text: string, opts: ImportOptions = {}): Impor
         add({ id, name, website: fields.website ?? "" });
         summary.created++;
       }
+      if (orgs.length) db.addContactOrgs(id, orgs, { touch: false });
       if (related.length) pending.push({ id, related });
     }
 
@@ -255,4 +309,67 @@ export function importCsv(db: DB, text: string, opts: ImportOptions = {}): Impor
     summary.relations = linked.size;
     return summary;
   });
+}
+
+/**
+ * Imports an organizations sheet. A blank name falls back to the website's domain; a "School" column
+ * becomes the parent organization. Rows matching an existing org (by name or website) are merged.
+ */
+export function importOrgsCsv(db: DB, text: string, opts: ImportOptions = {}): ImportSummary {
+  const rows = parseCsv(text);
+  const summary: ImportSummary = { created: 0, merged: 0, stubs: 0, relations: 0, skipped: 0, notes: [] };
+  if (rows.length < 2) return summary;
+  const headers = rows[0];
+  const mapping = { ...guessMapping(headers, "orgs"), ...opts.mapping } as Record<string, OrgImportTarget>;
+
+  return db.transaction(() => {
+    for (const [i, row] of rows.slice(1).entries()) {
+      const fields: OrgInput = {};
+      let parent: { name: string; type: string } | undefined;
+      headers.forEach((h, col) => {
+        const target = mapping[h];
+        const value = (row[col] ?? "").trim();
+        if (!value || !target || target === "ignore") return;
+        if (target === "parent") parent = { name: value, type: isSchoolHeader(h) ? "School" : "" };
+        else fields[target] = fields[target] ? `${fields[target]}\n${value}` : value;
+      });
+
+      let name = fields.name ?? "";
+      if (!name && fields.website) {
+        name = hostName(fields.website);
+        summary.notes.push(`Row ${i + 2}: no name; saved as "${name}". Rename it on the Organizations page.`);
+      }
+      if (!name) {
+        summary.skipped++;
+        summary.notes.push(`Row ${i + 2}: no name or website, skipped.`);
+        continue;
+      }
+      if (parent && parent.name.toLowerCase() !== name.toLowerCase()) fields.parent_id = db.ensureOrg(parent.name, { type: parent.type });
+
+      const key = siteKey(fields.website ?? "");
+      const existing = db.findOrg(name) ?? (key ? db.listOrgs().find((o) => siteKey(o.website) === key) : undefined);
+      if (existing) {
+        const patch: OrgInput = {};
+        for (const f of ["type", "website", "description", "notes"] as const) if (fields[f] && !existing[f]) patch[f] = fields[f];
+        if (fields.parent_id && !existing.parent_id) patch.parent_id = fields.parent_id;
+        db.updateOrg(existing.id, patch);
+        summary.merged++;
+      } else {
+        db.createOrg({ ...fields, name });
+        summary.created++;
+      }
+    }
+    return summary;
+  });
+}
+
+/** Host + path, ignoring scheme, "www." and trailing slashes, so two links to the same page compare equal. */
+function siteKey(url: string): string {
+  if (!url.trim()) return "";
+  try {
+    const u = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`);
+    return u.hostname.replace(/^www\./, "") + u.pathname.replace(/\/$/, "");
+  } catch {
+    return url.trim().toLowerCase();
+  }
 }

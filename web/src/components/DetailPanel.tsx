@@ -1,6 +1,7 @@
 import { useEffect } from "react";
-import { addDays, api, currentSchool, dueState, formatDate, LABELS, localToday, type Contact, type ContactInput, type Field } from "../api";
-import { DueBadge, SchoolChips, websiteLabel } from "./ContactTable";
+import { addDays, api, dueState, formatDate, LABELS, localToday, orgSummary, type Contact, type ContactInput, type Field, type Org } from "../api";
+import { DueBadge, websiteLabel } from "./ContactTable";
+import { MembershipsEditor } from "./MembershipsEditor";
 import { EditableCell } from "./EditableCell";
 import { RelatedEditor } from "./RelatedEditor";
 import { ResearchPanel } from "./ResearchPanel";
@@ -13,14 +14,16 @@ type Props = {
   tab: PanelTab;
   onTab: (tab: PanelTab) => void;
   onClose: () => void;
+  orgs: Org[];
   onOpen: (id: number) => void;
+  onOpenOrg: (id: number) => void;
   onUpdate: (id: number, fields: ContactInput) => Promise<void>;
   onChanged: () => void;
   notify: (msg: string) => void;
   researchEnabled: boolean;
 };
 
-export function DetailPanel({ contact: c, contacts, tab, onTab, onClose, onOpen, onUpdate, onChanged, notify, researchEnabled }: Props) {
+export function DetailPanel({ contact: c, contacts, orgs, tab, onTab, onClose, onOpen, onOpenOrg, onUpdate, onChanged, notify, researchEnabled }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !(e.target as HTMLElement).closest("input, textarea")) onClose();
@@ -54,7 +57,7 @@ export function DetailPanel({ contact: c, contacts, tab, onTab, onClose, onOpen,
         <div className="panel-title">
           <EditableCell value={c.name} onSave={save("name")} className="title-cell" />
           <div className="muted small">
-            {[c.role, c.department, currentSchool(c)].filter(Boolean).join(" · ")}
+            {[c.role, c.department, orgSummary(c)].filter(Boolean).join(" · ")}
             {!c.in_network && <span className="outside-badge">outside network</span>}
           </div>
         </div>
@@ -104,10 +107,10 @@ export function DetailPanel({ contact: c, contacts, tab, onTab, onClose, onOpen,
 
             {field("role", { list: "role-options" })}
             {field("department")}
-            {field("schools", {
-              display: <SchoolChips contact={c} onSetCurrent={(school) => onUpdate(c.id, { current_school: school })} />,
-              placeholder: "Add… (comma-separated)",
-            })}
+            <div className="field">
+              <label>{LABELS.orgs}</label>
+              <MembershipsEditor contact={c} orgs={orgs} onOpenOrg={onOpenOrg} onChanged={onChanged} notify={notify} />
+            </div>
             {field("research", { type: "textarea" })}
             {field("website", {
               display: (

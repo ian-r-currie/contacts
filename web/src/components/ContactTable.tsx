@@ -1,15 +1,16 @@
-import { currentSchool, dueState, formatDate, LABELS, splitSchools, type Contact, type ContactInput, type Field } from "../api";
+import { api, dueState, formatDate, LABELS, orgSummary, type Contact, type ContactInput, type Field } from "../api";
 import { EditableCell } from "./EditableCell";
+import { OrgChips, orgNames, parseOrgNames } from "./OrgChips";
 import type { PanelTab } from "./DetailPanel";
 
-export type Column = Exclude<Field, "current_school"> | "related" | "updated_at";
+export type Column = Field | "orgs" | "related" | "updated_at";
 export type SortKey = Column;
 
 export const ALL_COLUMNS: Column[] = [
   "name",
   "role",
   "department",
-  "schools",
+  "orgs",
   "research",
   "related",
   "email",
@@ -23,7 +24,7 @@ export const DEFAULT_COLUMNS: Column[] = [
   "name",
   "role",
   "department",
-  "schools",
+  "orgs",
   "research",
   "related",
   "last_contacted",
@@ -39,42 +40,9 @@ type Props = {
   selectedId?: number;
   onOpen: (id: number, tab?: PanelTab) => void;
   onUpdate: (id: number, fields: ContactInput) => void;
+  onChanged: () => void;
   researchEnabled: boolean;
 };
-
-/**
- * School chips. With several schools the current one is highlighted and clicking another makes it current
- * (clicking the current one again clears it). Clicks don't reach the surrounding editable cell.
- */
-export function SchoolChips({ contact, onSetCurrent }: { contact: Contact; onSetCurrent?: (school: string) => void }) {
-  const schools = splitSchools(contact.schools);
-  const current = currentSchool(contact);
-  const pickable = schools.length > 1 && onSetCurrent;
-  return (
-    <span className="chips">
-      {schools.map((s) =>
-        pickable ? (
-          <button
-            key={s}
-            className={`tag school ${s === current ? "current" : ""}`}
-            title={s === current ? "Current school (click to unmark)" : "Mark as current school"}
-            onClick={(e) => {
-              e.stopPropagation();
-              onSetCurrent(s === current ? "" : s);
-            }}
-            onKeyDown={(e) => e.stopPropagation()}
-          >
-            {s}
-          </button>
-        ) : (
-          <span key={s} className={`tag ${s === current && schools.length > 1 ? "current" : ""}`}>
-            {s}
-          </span>
-        ),
-      )}
-    </span>
-  );
-}
 
 export function DueBadge({ date }: { date: string }) {
   const state = dueState(date);
@@ -85,7 +53,7 @@ export function websiteLabel(url: string) {
   return url.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "");
 }
 
-export function ContactTable({ contacts, columns, sort, onSort, selectedId, onOpen, onUpdate, researchEnabled }: Props) {
+export function ContactTable({ contacts, columns, sort, onSort, selectedId, onOpen, onUpdate, onChanged, researchEnabled }: Props) {
   const cell = (c: Contact, col: Column) => {
     const save = (value: string) => onUpdate(c.id, { [col]: value });
     switch (col) {
@@ -127,12 +95,12 @@ export function ContactTable({ contacts, columns, sort, onSort, selectedId, onOp
         return <span className="muted">{formatDate(c.updated_at)}</span>;
       case "role":
         return <EditableCell value={c.role} onSave={save} list="role-options" />;
-      case "schools":
+      case "orgs":
         return (
           <EditableCell
-            value={c.schools}
-            onSave={save}
-            display={<SchoolChips contact={c} onSetCurrent={(school) => onUpdate(c.id, { current_school: school })} />}
+            value={orgNames(c)}
+            onSave={(text) => onUpdate(c.id, { orgs: parseOrgNames(text) })}
+            display={<OrgChips contact={c} onToggleCurrent={(m) => api.setMembership(c.id, m.id, !m.current).then(onChanged)} />}
           />
         );
       case "website":
@@ -212,7 +180,7 @@ export function ContactTable({ contacts, columns, sort, onSort, selectedId, onOp
                 <strong>{c.name}</strong>
                 {c.follow_up_date && <DueBadge date={c.follow_up_date} />}
               </div>
-              <div className="muted">{[c.role, c.department, currentSchool(c) || c.schools].filter(Boolean).join(" · ") || "No details yet"}</div>
+              <div className="muted">{[c.role, c.department, orgSummary(c)].filter(Boolean).join(" · ") || "No details yet"}</div>
               {c.research && <div className="card-research">{c.research}</div>}
               {c.related.length > 0 && <div className="muted small">↔ {c.related.map((r) => r.name).join(", ")}</div>}
             </button>
